@@ -190,19 +190,12 @@ const mongo = new MongoClient(MONGODB_URI, {
         strict: true,
         deprecationErrors: true
     },
-
     tls: true,
-
     connectTimeoutMS: 10000,
-
     serverSelectionTimeoutMS: 10000,
-
     maxPoolSize: 10,
-
     minPoolSize: 2,
-
     retryWrites: true,
-
     retryReads: true
 });
 
