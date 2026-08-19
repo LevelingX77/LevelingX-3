@@ -1,18 +1,15 @@
 {
   "name": "77-community-bot",
   "version": "1.0.0",
-  "description": "Discord Anonymous Message Bot for Hosting",
-  "main": "index.js",
+  "description": "77 Community Discord Bot",
+  "main": "main.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node main.js"
   },
   "dependencies": {
-    "discord.js": "^14.15.3",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "mongodb": "^6.8.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "mongodb": "^6.20.0"
   }
 }
