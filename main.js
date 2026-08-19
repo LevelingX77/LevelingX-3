@@ -137,13 +137,40 @@ validateUIConfig();
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const PORT = Number(process.env.PORT) || 10000;
 
-if (!TOKEN || !CLIENT_ID || !MONGODB_URI) {
+if (!TOKEN || !CLIENT_ID || !DISCORD_GUILD_ID || !MONGODB_URI) {
     console.error("❌ Missing required environment variables");
     console.error(
-        "Required: DISCORD_TOKEN, CLIENT_ID, MONGODB_URI"
+        "Required: DISCORD_TOKEN, CLIENT_ID, DISCORD_GUILD_ID, MONGODB_URI"
+    );
+    process.exit(1);
+}
+
+// Discord snowflake ID = ตัวเลขล้วน 17-20 หลัก
+// CLIENT_ID ต้องเป็น "Application ID" จาก Discord Developer Portal
+// (Developer Portal > Your App > General Information > Application ID)
+// ไม่ใช่ Bot Token และไม่ใช่ Public Key — ถ้าใส่ผิดตัว Slash Command จะไม่ขึ้นแม้ register สำเร็จ
+const SNOWFLAKE_REGEX = /^\d{17,20}$/;
+
+if (!SNOWFLAKE_REGEX.test(CLIENT_ID)) {
+    console.error(
+        "❌ CLIENT_ID รูปแบบไม่ถูกต้อง — ต้องเป็นตัวเลขล้วน 17-20 หลัก (Application ID)"
+    );
+    console.error(
+        "   ตรวจได้ที่ Discord Developer Portal > Your App > General Information > Application ID"
+    );
+    process.exit(1);
+}
+
+if (!SNOWFLAKE_REGEX.test(DISCORD_GUILD_ID)) {
+    console.error(
+        "❌ DISCORD_GUILD_ID รูปแบบไม่ถูกต้อง — ต้องเป็นตัวเลขล้วน 17-20 หลัก (Server ID)"
+    );
+    console.error(
+        "   ตรวจได้โดยเปิด Developer Mode ใน Discord แล้วคลิกขวาที่ Server > Copy Server ID"
     );
     process.exit(1);
 }
@@ -361,30 +388,109 @@ const commands = [
 // ======================================================
 
 async function registerCommands() {
+    const commandNames = commands
+        .map(command => command.name)
+        .join(", ");
+
     try {
         console.log(
-            "🔄 Registering slash commands..."
+            `🔄 Registering ${commands.length} slash command(s) [${commandNames}]`
+        );
+        console.log(
+            `   → Target: Guild Commands (instant) | Guild ID: ${DISCORD_GUILD_ID} | Application ID: ${CLIENT_ID}`
         );
 
         const rest = new REST({
             version: "10"
         }).setToken(TOKEN);
 
-        await rest.put(
-            Routes.applicationCommands(CLIENT_ID),
+        // ตรวจสอบว่า Bot อยู่ใน Guild นี้จริง ก่อน register
+        // ถ้า Bot ไม่ได้ถูก invite เข้า Server นี้ (หรือ invite ไม่ครบ scope)
+        // rest.put จะโยน error 404 Unknown Guild / Missing Access
+        let guildInfo;
+
+        try {
+            guildInfo = await rest.get(
+                Routes.guild(DISCORD_GUILD_ID)
+            );
+        } catch (guildCheckError) {
+            console.error(
+                "❌ Bot ไม่พบ Guild นี้ หรือ Bot ยังไม่ถูก invite เข้า Server ด้วย scope 'bot'"
+            );
+            console.error(
+                "   สาเหตุที่เป็นไปได้: DISCORD_GUILD_ID ผิด, หรือบอทไม่ได้อยู่ในเซิร์ฟเวอร์นี้"
+            );
+
+            throw guildCheckError;
+        }
+
+        console.log(
+            `✅ ยืนยันแล้วว่า Bot อยู่ใน Guild: ${guildInfo.name} (${DISCORD_GUILD_ID})`
+        );
+
+        const result = await rest.put(
+            Routes.applicationGuildCommands(
+                CLIENT_ID,
+                DISCORD_GUILD_ID
+            ),
             {
                 body: commands
             }
         );
 
         console.log(
-            "✅ Slash commands registered"
+            `✅ Slash commands registered สำเร็จ ${result.length} คำสั่ง ไปที่ Guild ID: ${DISCORD_GUILD_ID}`
+        );
+        console.log(
+            `   คำสั่งที่ลงทะเบียน: ${result.map(c => "/" + c.name).join(", ")}`
+        );
+        console.log(
+            "   ℹ️ Guild Commands ขึ้นทันที (ไม่ต้องรอ 1 ชม. เหมือน Global Commands)"
         );
     } catch (error) {
         console.error(
             "❌ Failed to register slash commands:",
             sanitizeError(error)
         );
+
+        // ดึงรายละเอียด error จาก Discord REST API ให้ชัดเจนขึ้น
+        // (error.status / error.code / error.rawError มักบอกสาเหตุตรงๆ)
+        if (error.status) {
+            console.error(
+                `   HTTP Status: ${error.status}`
+            );
+        }
+
+        if (error.code) {
+            console.error(
+                `   Discord Error Code: ${error.code}`
+            );
+        }
+
+        if (error.rawError) {
+            console.error(
+                "   Discord Response:",
+                JSON.stringify(error.rawError)
+            );
+        }
+
+        if (error.status === 401) {
+            console.error(
+                "   → DISCORD_TOKEN ไม่ถูกต้องหรือหมดอายุ"
+            );
+        }
+
+        if (error.status === 404) {
+            console.error(
+                "   → CLIENT_ID หรือ DISCORD_GUILD_ID ไม่ถูกต้อง หรือ Bot ไม่ได้อยู่ใน Server นั้น"
+            );
+        }
+
+        if (error.status === 403) {
+            console.error(
+                "   → Bot ถูก invite เข้า Server โดยไม่มี scope 'applications.commands' — ต้อง Kick บอทออกแล้ว invite ใหม่ด้วยลิงก์ที่มีทั้ง scope 'bot' และ 'applications.commands'"
+            );
+        }
 
         throw error;
     }
@@ -782,6 +888,18 @@ client.once(
         try {
             console.log(
                 `🤖 Logged in as ${readyClient.user.tag}`
+            );
+
+            const inviteUrl =
+                `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}` +
+                `&permissions=${PermissionFlagsBits.Administrator}` +
+                `&scope=bot%20applications.commands`;
+
+            console.log(
+                "ℹ️ ถ้า Slash Command ไม่ขึ้น ให้ตรวจว่าบอทถูก invite ด้วยลิงก์ที่มี scope 'bot' และ 'applications.commands' ทั้งคู่:"
+            );
+            console.log(
+                `   ${inviteUrl}`
             );
 
             await registerCommands();
