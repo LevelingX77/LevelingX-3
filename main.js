@@ -137,14 +137,13 @@ validateUIConfig();
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const PORT = Number(process.env.PORT) || 10000;
 
-if (!TOKEN || !CLIENT_ID || !DISCORD_GUILD_ID || !MONGODB_URI) {
+if (!TOKEN || !CLIENT_ID || !MONGODB_URI) {
     console.error("❌ Missing required environment variables");
     console.error(
-        "Required: DISCORD_TOKEN, CLIENT_ID, DISCORD_GUILD_ID, MONGODB_URI"
+        "Required: DISCORD_TOKEN, CLIENT_ID, MONGODB_URI"
     );
     process.exit(1);
 }
@@ -161,16 +160,6 @@ if (!SNOWFLAKE_REGEX.test(CLIENT_ID)) {
     );
     console.error(
         "   ตรวจได้ที่ Discord Developer Portal > Your App > General Information > Application ID"
-    );
-    process.exit(1);
-}
-
-if (!SNOWFLAKE_REGEX.test(DISCORD_GUILD_ID)) {
-    console.error(
-        "❌ DISCORD_GUILD_ID รูปแบบไม่ถูกต้อง — ต้องเป็นตัวเลขล้วน 17-20 หลัก (Server ID)"
-    );
-    console.error(
-        "   ตรวจได้โดยเปิด Developer Mode ใน Discord แล้วคลิกขวาที่ Server > Copy Server ID"
     );
     process.exit(1);
 }
@@ -312,11 +301,23 @@ async function connectDatabase(
             );
 
             if (attempt === maxRetries) {
+                // สำคัญ: ห้ามให้ MongoDB ล่มพา Discord Bot ล่มไปด้วย
+                // Bot ยัง login และ register slash commands ได้ตามปกติ
+                // ฟีเจอร์ที่ต้องใช้ฐานข้อมูล (บันทึก setup, เก็บข้อความฝากบอก ฯลฯ)
+                // จะแจ้งผู้ใช้ว่าใช้งานไม่ได้ชั่วคราวแทนที่จะทำให้ทั้งบอทปิดตัว
                 console.error(
-                    "❌ Failed to connect to MongoDB."
+                    "❌ ไม่สามารถเชื่อมต่อ MongoDB ได้หลังจากลองครบทุกครั้งแล้ว"
+                );
+                console.error(
+                    "   ⚠️ Discord Bot จะยัง login และ register slash commands ต่อไปตามปกติ"
+                );
+                console.error(
+                    "   ⚠️ แต่ฟีเจอร์ที่ต้องใช้ฐานข้อมูล (setup / setchannel / ฝากบอก) จะใช้งานไม่ได้จนกว่าจะเชื่อมต่อ MongoDB สำเร็จ"
                 );
 
-                process.exit(1);
+                scheduleDatabaseReconnect();
+
+                return false;
             }
 
             console.log(
@@ -330,6 +331,36 @@ async function connectDatabase(
     }
 
     return false;
+}
+
+// ======================================================
+// 7B. BACKGROUND MONGODB RECONNECT
+// พยายามเชื่อมต่อ MongoDB ใหม่เรื่อยๆ แบบไม่บล็อก Discord Bot
+// ======================================================
+
+let reconnectScheduled = false;
+
+function scheduleDatabaseReconnect(delayMs = 60000) {
+    if (reconnectScheduled) {
+        return;
+    }
+
+    reconnectScheduled = true;
+
+    setTimeout(async () => {
+        reconnectScheduled = false;
+
+        if (db) {
+            // เชื่อมต่อสำเร็จไปแล้วจากที่อื่นระหว่างรอ
+            return;
+        }
+
+        console.log(
+            "🔄 กำลังลองเชื่อมต่อ MongoDB อีกครั้งใน background..."
+        );
+
+        await connectDatabase();
+    }, delayMs);
 }
 
 // ======================================================
@@ -397,55 +428,28 @@ async function registerCommands() {
             `🔄 Registering ${commands.length} slash command(s) [${commandNames}]`
         );
         console.log(
-            `   → Target: Guild Commands (instant) | Guild ID: ${DISCORD_GUILD_ID} | Application ID: ${CLIENT_ID}`
+            `   → Target: Global Commands | Application ID: ${CLIENT_ID}`
         );
 
         const rest = new REST({
             version: "10"
         }).setToken(TOKEN);
 
-        // ตรวจสอบว่า Bot อยู่ใน Guild นี้จริง ก่อน register
-        // ถ้า Bot ไม่ได้ถูก invite เข้า Server นี้ (หรือ invite ไม่ครบ scope)
-        // rest.put จะโยน error 404 Unknown Guild / Missing Access
-        let guildInfo;
-
-        try {
-            guildInfo = await rest.get(
-                Routes.guild(DISCORD_GUILD_ID)
-            );
-        } catch (guildCheckError) {
-            console.error(
-                "❌ Bot ไม่พบ Guild นี้ หรือ Bot ยังไม่ถูก invite เข้า Server ด้วย scope 'bot'"
-            );
-            console.error(
-                "   สาเหตุที่เป็นไปได้: DISCORD_GUILD_ID ผิด, หรือบอทไม่ได้อยู่ในเซิร์ฟเวอร์นี้"
-            );
-
-            throw guildCheckError;
-        }
-
-        console.log(
-            `✅ ยืนยันแล้วว่า Bot อยู่ใน Guild: ${guildInfo.name} (${DISCORD_GUILD_ID})`
-        );
-
         const result = await rest.put(
-            Routes.applicationGuildCommands(
-                CLIENT_ID,
-                DISCORD_GUILD_ID
-            ),
+            Routes.applicationCommands(CLIENT_ID),
             {
                 body: commands
             }
         );
 
         console.log(
-            `✅ Slash commands registered สำเร็จ ${result.length} คำสั่ง ไปที่ Guild ID: ${DISCORD_GUILD_ID}`
+            `✅ Slash commands registered สำเร็จ ${result.length} คำสั่ง (Global)`
         );
         console.log(
             `   คำสั่งที่ลงทะเบียน: ${result.map(c => "/" + c.name).join(", ")}`
         );
         console.log(
-            "   ℹ️ Guild Commands ขึ้นทันที (ไม่ต้องรอ 1 ชม. เหมือน Global Commands)"
+            "   ℹ️ Global Commands อาจใช้เวลาสักพัก (โดยทั่วไปไม่กี่นาที แต่บางครั้งนานถึง ~1 ชม.) กว่าจะกระจายไปครบทุก Server — ไม่ต้อง register ซ้ำ แค่รอ"
         );
     } catch (error) {
         console.error(
@@ -482,17 +486,19 @@ async function registerCommands() {
 
         if (error.status === 404) {
             console.error(
-                "   → CLIENT_ID หรือ DISCORD_GUILD_ID ไม่ถูกต้อง หรือ Bot ไม่ได้อยู่ใน Server นั้น"
+                "   → CLIENT_ID ไม่ถูกต้อง (ต้องเป็น Application ID จาก Developer Portal)"
             );
         }
 
         if (error.status === 403) {
             console.error(
-                "   → Bot ถูก invite เข้า Server โดยไม่มี scope 'applications.commands' — ต้อง Kick บอทออกแล้ว invite ใหม่ด้วยลิงก์ที่มีทั้ง scope 'bot' และ 'applications.commands'"
+                "   → Bot Token ไม่มีสิทธิ์แก้ไข Commands ของ Application นี้ — ตรวจว่า TOKEN กับ CLIENT_ID เป็นของแอปเดียวกัน"
             );
         }
 
-        throw error;
+        // ไม่ throw error ต่อ เพื่อไม่ให้ Discord Bot ทั้งตัวล่มเพียงเพราะ
+        // register commands ล้มเหลวชั่วคราว (เช่น Discord API ดีเลย์/rate limit)
+        // Bot ยัง login และตอบ interaction เดิม ๆ ได้ตามปกติ
     }
 }
 
@@ -1931,7 +1937,15 @@ client.on(
 
 (async () => {
     try {
-        await connectDatabase();
+        // สำคัญ: ไม่ await connectDatabase() ตรงนี้
+        // ให้ Mongo เชื่อมต่อใน background แทน เพื่อไม่ให้ MongoDB ที่ต่อช้า/ล่ม
+        // ไปบล็อกหรือทำให้ Discord Bot login/register commands ไม่ได้
+        connectDatabase().catch(error => {
+            console.error(
+                "❌ MongoDB background connection error:",
+                sanitizeError(error)
+            );
+        });
 
         console.log(
             "🔄 Logging in to Discord..."
