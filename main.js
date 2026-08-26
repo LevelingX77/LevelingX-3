@@ -38,7 +38,7 @@ const UI_CONFIG = {
             "มีอะไรอยู่ในใจ แต่ไม่กล้าบอก ลองใช้บอทตัวนี้เป็นตัวแทนในการบอกได้ โดยที่อีกฝ่ายจะไม่รู้ว่าเราคือใคร",
         color: "#FF69B4",
         image:
-            "https://cdn.discordapp.com/attachments/1538819802641211406/1539514882695893132/nyhearts_carrd.co.gif?ex=6a869876&is=6a8546f6&hm=54fc6a973a70bf60949d46eacfd02313482f59b844d6920d01bbd3518f97dd9f&",
+            "https://cdn.discordapp.com/attachments/1539965115900629003/1542078143563833374/Ad3-7cdFqb0b5hwsLufYYwaUhdlfSM28Vt7DERCwPSw.gif?ex=6a8febaf&is=6a8e9a2f&hm=9d405dd201390abed9ca6df19f481a2c9215de5b39b44b108dda24beaf57785f&",
         thumbnail: "",
         footer: "LevelingX"
     },
