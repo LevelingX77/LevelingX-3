@@ -579,10 +579,10 @@ function buildAnonymousMessageEmbed(
     return new EmbedBuilder()
         .setColor("#5865F2")
         .setTitle(
-            "📨 มีข้อความฝากบอกถึงคุณ"
+            "มีข้อความฝากบอกถึงคุณ"
         )
         .setDescription(
-            `ถึง: <@${record.recipientId}> 🎉`
+            `ถึง: <@${record.recipientId}>`
         )
         .addFields(
             {
@@ -629,7 +629,7 @@ function buildRepliedEmbed(
     return new EmbedBuilder()
         .setColor("#57F287")
         .setTitle(
-            "📨 ข้อความนี้ถูกตอบกลับแล้ว"
+            "ข้อความนี้ถูกตอบกลับแล้ว"
         )
         .setDescription(
             `ถึง: <@${record.recipientId}>`
