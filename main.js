@@ -321,6 +321,11 @@ let botStatsCollection;
 // แม้ connection จริงจะตายไปแล้ว
 let mongoConnected = false;
 
+// ใช้ประสาน timing ระหว่าง MongoDB connect กับ Discord ready — เพราะสองอย่างนี้
+// เชื่อมต่อแบบ async แยกกัน ไม่รู้ว่าอันไหนจะพร้อมก่อน ฟังก์ชัน syncAllSetupPanels()
+// ต้องรอทั้งคู่พร้อมก่อนถึงจะรันได้ (ต้องมีทั้ง guildSetups collection และ client login แล้ว)
+let setupPanelsSyncedOnce = false;
+
 function isMongoConnected() {
     return mongoConnected === true;
 }
@@ -468,6 +473,12 @@ async function connectDatabase(
                 );
 
                 mongoConnected = true;
+
+                // เผื่อ Discord Client login เสร็จ (ClientReady ยิงไปแล้ว) ก่อนที่
+                // MongoDB จะเชื่อมต่อสำเร็จ — ต้องมาเรียก sync ตรงนี้อีกที เพราะ
+                // ตอน ClientReady เรียก trySyncSetupPanelsOnce() ไปแล้ว guildSetups
+                // อาจยังไม่มีค่า (ฟังก์ชันเองมี setupPanelsSyncedOnce กันไม่ให้ทำซ้ำ)
+                trySyncSetupPanelsOnce();
 
                 return true;
             } catch (error) {
@@ -667,6 +678,15 @@ const commands = [
             PermissionFlagsBits.Administrator
         )
         .setDMPermission(false),
+
+    // /help เปิดให้ทุกคนใช้ได้ตามปกติ (ไม่มี setDefaultMemberPermissions)
+    // อธิบายเฉพาะ /setup และ /setchannel เท่านั้น — ห้ามพูดถึง /owner-1, /owner-2,
+    // /owner-3 เพราะเป็นคำสั่งลับสำหรับ Bot Owner เท่านั้น การใส่ไว้ใน /help
+    // จะทำให้ผู้ใช้ทั่วไปรู้ว่ามีคำสั่งลับเหล่านี้อยู่
+    new SlashCommandBuilder()
+        .setName("help")
+        .setDescription("วิธีการใช้บอท")
+        .setDMPermission(true),
 
     // หมายเหตุ: /owner-1, /owner-2, /owner-3 ไม่ได้ตั้ง setDefaultMemberPermissions
     // เป็น Administrator เพราะ Owner ของบอทอาจไม่ใช่ Admin ในทุกเซิร์ฟเวอร์ที่บอทอยู่
@@ -1385,6 +1405,108 @@ async function syncAllGuildStats() {
 }
 
 // ======================================================
+// 15C-2. AUTO-SYNC SETUP PANEL EMBEDS
+// เมื่อแก้ไข UI_CONFIG ในโค้ด (เช่น เปลี่ยนรูปภาพ/ข้อความ embed) แล้ว deploy ใหม่
+// ฟังก์ชันนี้จะไล่อัปเดต embed ของหน้าต่างฝากบอกในทุกเซิร์ฟเวอร์ที่เคยตั้งค่า
+// /setup ไว้แล้วโดยอัตโนมัติตอนบอทเริ่มทำงาน แอดมินแต่ละเซิร์ฟเวอร์ไม่ต้องกด
+// /setup ซ้ำเองทุกครั้งที่มีการแก้ embed
+// ======================================================
+
+async function syncAllSetupPanels() {
+    if (!guildSetups) {
+        return;
+    }
+
+    // Build embed/button ครั้งเดียวจาก UI_CONFIG ล่าสุด แล้วใช้ซ้ำกับทุกเซิร์ฟเวอร์
+    const embed = buildMainEmbed();
+    const button = buildMainButton();
+
+    let cursor;
+
+    try {
+        cursor = guildSetups.find({
+            panelChannelId: { $exists: true, $ne: null },
+            panelMessageId: { $exists: true, $ne: null }
+        });
+    } catch (error) {
+        console.error(
+            "⚠️ Query setup panels error:",
+            sanitizeError(error)
+        );
+
+        return;
+    }
+
+    let updated = 0;
+    let failed = 0;
+
+    try {
+        for await (const setup of cursor) {
+            // ใช้ retries: 1 เพื่อไม่ยิง API ซ้ำหนักเกินไปตอน sync ทีเดียวหลายเซิร์ฟเวอร์
+            // ถ้าพลาดรอบนี้ จะลองใหม่อัตโนมัติตอน deploy ครั้งถัดไป
+            const success = await editAnonymousChannelMessage(
+                setup.panelChannelId,
+                setup.panelMessageId,
+                embed,
+                [button],
+                1
+            );
+
+            if (success) {
+                updated += 1;
+            } else {
+                failed += 1;
+            }
+
+            // หน่วงเล็กน้อยระหว่างแต่ละเซิร์ฟเวอร์ กัน Discord rate limit
+            // เมื่อมีหลายเซิร์ฟเวอร์ที่ตั้งค่าไว้พร้อมกัน
+            await new Promise(resolve =>
+                setTimeout(resolve, 300)
+            );
+        }
+    } catch (error) {
+        console.error(
+            "⚠️ Sync setup panels cursor error:",
+            sanitizeError(error)
+        );
+    }
+
+    if (updated > 0 || failed > 0) {
+        console.log(
+            `🖼️ Sync setup panel embeds: สำเร็จ ${updated} เซิร์ฟเวอร์, ล้มเหลว ${failed} เซิร์ฟเวอร์ (message ถูกลบ/ไม่มีสิทธิ์เข้าถึง)`
+        );
+    }
+}
+
+// เรียก syncAllSetupPanels() ครั้งเดียวหลังจากทั้ง MongoDB (guildSetups collection)
+// และ Discord Client (login แล้ว) พร้อมทั้งคู่ — เพราะสองอย่างนี้เชื่อมต่อแบบ async
+// แยกกันคนละจังหวะ ไม่รู้ล่วงหน้าว่าอันไหนจะพร้อมก่อน จึงต้องเรียกฟังก์ชันนี้ทั้งจาก
+// ClientReady และจากตอน MongoDB connect สำเร็จ (ดู connectDatabase) เพื่อให้ไม่ว่า
+// อันไหนพร้อมทีหลัง sync ก็จะยังทำงานจนได้ และ setupPanelsSyncedOnce กันไม่ให้รันซ้ำ
+function trySyncSetupPanelsOnce() {
+    if (setupPanelsSyncedOnce) {
+        return;
+    }
+
+    if (!guildSetups) {
+        return;
+    }
+
+    if (!client.isReady()) {
+        return;
+    }
+
+    setupPanelsSyncedOnce = true;
+
+    syncAllSetupPanels().catch(error => {
+        console.error(
+            "⚠️ Sync setup panels error:",
+            sanitizeError(error)
+        );
+    });
+}
+
+// ======================================================
 // 15D. BOT PRESENCE ROTATION
 // สลับข้อความ "Watching X Servers" / "Watching X Members" ทุก ~15 วินาที
 // โดยใช้ client.guilds.cache เท่านั้น ไม่ fetch สมาชิกเพิ่ม
@@ -1577,6 +1699,12 @@ client.once(
                     sanitizeError(error)
                 );
             });
+
+            // อัปเดต embed หน้าต่างฝากบอกของทุกเซิร์ฟเวอร์ที่เคย /setup ไว้แล้ว
+            // ให้ตรงกับ UI_CONFIG ล่าสุดในโค้ดโดยอัตโนมัติ (เผื่อ MongoDB ยังไม่พร้อม
+            // ตอนนี้ trySyncSetupPanelsOnce() จะถูกเรียกซ้ำอีกครั้งตอน MongoDB
+            // เชื่อมต่อสำเร็จใน connectDatabase())
+            trySyncSetupPanelsOnce();
 
             console.log(
                 "🚀 Bot is fully ready and operational!"
@@ -1906,6 +2034,42 @@ client.on(
                 return interaction.editReply({
                     embeds: [embed],
                     components
+                });
+            }
+
+            // ==================================================
+            // /help — อธิบายเฉพาะ /setup และ /setchannel
+            // ==================================================
+
+            if (
+                interaction.isChatInputCommand() &&
+                interaction.commandName === "help"
+            ) {
+                const helpEmbed = new EmbedBuilder()
+                    .setColor(UI_CONFIG.embed.color)
+                    .setTitle("วิธีใช้งานบอท")
+                    .setDescription(
+                        "คำสั่งที่ใช้งานได้สำหรับผู้ที่ใช้งานบอทนี้:"
+                    )
+                    .addFields(
+                        {
+                            name: "/setup",
+                            value: "สร้าง หรืออัปเดตหน้าต่างฝากบอกในช่องปัจจุบัน",
+                            inline: false
+                        },
+                        {
+                            name: "/setchannel",
+                            value: "กำหนดช่องที่จะใช้รับข้อความฝากบอกที่ถูกส่งเข้ามา",
+                            inline: false
+                        }
+                    )
+                    .setFooter({
+                        text: UI_CONFIG.embed.footer
+                    });
+
+                return interaction.reply({
+                    embeds: [helpEmbed],
+                    ephemeral: true
                 });
             }
 
