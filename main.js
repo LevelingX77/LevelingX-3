@@ -668,11 +668,16 @@ const commands = [
         )
         .setDMPermission(false),
 
-    // หมายเหตุ: /stats, /servers, /botstats ไม่ได้ตั้ง setDefaultMemberPermissions
+    // หมายเหตุ: /owner-1, /owner-2, /owner-3 ไม่ได้ตั้ง setDefaultMemberPermissions
     // เป็น Administrator เพราะ Owner ของบอทอาจไม่ใช่ Admin ในทุกเซิร์ฟเวอร์ที่บอทอยู่
     // การจำกัดสิทธิ์ทำที่ระดับ interaction.user.id === process.env.BOT_OWNER_ID
     // ตอน execute เท่านั้น (ดู isBotOwner) — ห้ามพึ่งพา Discord permission system
     // สำหรับคำสั่งกลุ่มนี้ เพราะ Owner ต้องใช้ได้ไม่ว่าจะอยู่ role ไหนก็ตาม
+    // Mapping: owner-1 = stats ภาพรวม, owner-2 = server list (มี pagination),
+    // owner-3 = botstats เชิงลึก — ชื่อ command กับ if-block ในตัว interaction
+    // handler ต้องตรงกันเป๊ะเสมอ ไม่งั้นคำสั่งจะไม่ตอบสนองเลย (Discord จะขึ้นว่า
+    // "The application did not respond" เพราะไม่มี branch ไหน match แล้วไม่มีการ
+    // reply/defer ภายใน 3 วินาที)
     new SlashCommandBuilder()
         .setName("owner-1")
         .setDescription("...")
@@ -1636,12 +1641,12 @@ client.on(
             }
 
             // ==================================================
-            // /stats — OWNER ONLY
+            // /owner-1 — OWNER ONLY
             // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
-                interaction.commandName === "stats"
+                interaction.commandName === "owner-1"
             ) {
                 // ตรวจสอบ Owner ก่อนทำอะไรทั้งสิ้น ห้าม query ข้อมูลใดๆ ก่อนผ่านจุดนี้
                 if (await rejectIfNotOwner(interaction)) {
@@ -1736,12 +1741,12 @@ client.on(
             }
 
             // ==================================================
-            // /botstats — OWNER ONLY
+            // /owner-3 — OWNER ONLY
             // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
-                interaction.commandName === "botstats"
+                interaction.commandName === "owner-3"
             ) {
                 if (await rejectIfNotOwner(interaction)) {
                     return;
@@ -1841,12 +1846,12 @@ client.on(
             }
 
             // ==================================================
-            // /servers — OWNER ONLY (with pagination)
+            // /owner-2 — OWNER ONLY (with pagination)
             // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
-                interaction.commandName === "servers"
+                interaction.commandName === "owner-2"
             ) {
                 // ตรวจสอบ Owner ก่อน — ห้าม query/ส่ง Server List ก่อนผ่านจุดนี้
                 if (await rejectIfNotOwner(interaction)) {
