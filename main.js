@@ -139,6 +139,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const MONGODB_URI = process.env.MONGODB_URI;
 const PORT = Number(process.env.PORT) || 10000;
+const BOT_OWNER_ID = process.env.BOT_OWNER_ID;
 
 if (!TOKEN || !CLIENT_ID || !MONGODB_URI) {
     console.error("❌ Missing required environment variables");
@@ -164,6 +165,76 @@ if (!SNOWFLAKE_REGEX.test(CLIENT_ID)) {
     process.exit(1);
 }
 
+// BOT_OWNER_ID ไม่ใช่ required env var แบบ hard requirement เพื่อไม่ให้บอทที่ใช้งานอยู่แล้ว
+// crash โดยไม่จำเป็นถ้ายังไม่ได้ตั้งค่า แต่คำสั่ง Owner-only (/stats, /servers, /botstats)
+// จะถูกปฏิเสธเสมอถ้าไม่มีค่านี้ (ดูฟังก์ชัน isBotOwner ด้านล่าง)
+if (!BOT_OWNER_ID) {
+    console.error(
+        "⚠️ BOT_OWNER_ID ไม่ได้ถูกตั้งค่าใน Environment Variables"
+    );
+    console.error(
+        "   → คำสั่ง Owner-only (/stats, /servers, /botstats) จะถูกปิดใช้งานจนกว่าจะตั้งค่านี้"
+    );
+} else if (!SNOWFLAKE_REGEX.test(BOT_OWNER_ID)) {
+    console.error(
+        "⚠️ BOT_OWNER_ID รูปแบบไม่ถูกต้อง — ต้องเป็นตัวเลขล้วน 17-20 หลัก (Discord User ID)"
+    );
+    console.error(
+        "   → คำสั่ง Owner-only จะถูกปิดใช้งานจนกว่าจะแก้ไขค่านี้ให้ถูกต้อง"
+    );
+}
+
+// ฟังก์ชันตรวจสอบว่า user เป็น Bot Owner หรือไม่
+// ใช้ interaction.user.id === process.env.BOT_OWNER_ID เท่านั้น
+// ห้ามใช้ username / displayName / nickname / Administrator / Manage Server / role ใดๆ
+function isBotOwner(userId) {
+    if (!BOT_OWNER_ID) {
+        return false;
+    }
+
+    if (!SNOWFLAKE_REGEX.test(BOT_OWNER_ID)) {
+        return false;
+    }
+
+    return userId === BOT_OWNER_ID;
+}
+
+async function rejectIfNotOwner(interaction) {
+    if (isBotOwner(interaction.user.id)) {
+        return false;
+    }
+
+    const replyPayload = {
+        content: "คำสั่งนี้ใช้ได้เฉพาะ Bot Owner เท่านั้น",
+        ephemeral: true
+    };
+
+    try {
+        if (interaction.replied || interaction.deferred) {
+            await interaction.editReply(replyPayload);
+        } else {
+            await interaction.reply(replyPayload);
+        }
+    } catch (error) {
+        console.error(
+            "Owner-check reply error:",
+            sanitizeErrorEarly(error)
+        );
+    }
+
+    return true;
+}
+
+// sanitizeError ยังไม่ถูก define ตอนนี้ (มันอยู่หัวข้อ 6 ด้านล่าง)
+// ใช้ตัวช่วยเบื้องต้นสำหรับจุดนี้เพื่อไม่ต้องย้ายโค้ดทั้งหมด
+function sanitizeErrorEarly(error) {
+    if (!error) {
+        return "Unknown Error";
+    }
+
+    return String(error.message || error);
+}
+
 if (
     !MONGODB_URI.startsWith("mongodb://") &&
     !MONGODB_URI.startsWith("mongodb+srv://")
@@ -185,12 +256,34 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-    res.status(200).json({
-        status: "ok"
+    const discordConnected =
+        typeof client !== "undefined" &&
+        client?.isReady?.() === true;
+
+    const databaseConnected =
+        typeof isMongoConnected === "function" &&
+        isMongoConnected();
+
+    let status = "ok";
+
+    if (!discordConnected && !databaseConnected) {
+        status = "error";
+    } else if (!discordConnected || !databaseConnected) {
+        status = "degraded";
+    }
+
+    const httpStatus = status === "error" ? 503 : 200;
+
+    res.status(httpStatus).json({
+        status,
+        discord: discordConnected ? "connected" : "disconnected",
+        database: databaseConnected ? "connected" : "disconnected",
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
     });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+const httpServer = app.listen(PORT, "0.0.0.0", () => {
     console.log(
         `🌐 Web server listening on port ${PORT}`
     );
@@ -218,6 +311,48 @@ const mongo = new MongoClient(MONGODB_URI, {
 let db;
 let guildSetups;
 let anonymousMessages;
+let botGuildsCollection;
+let botStatsCollection;
+
+// สถานะการเชื่อมต่อ MongoDB "จริง" — ไม่ใช่แค่ตัวแปร db มีค่าอยู่หรือไม่
+// mongoConnected จะถูกอัปเดตจาก event ของ MongoClient เท่านั้น (serverHeartbeatSucceeded /
+// close / error / topologyClosed) เพื่อสะท้อนสถานะ connection ที่แท้จริง
+// แก้ปัญหาเดิมที่ใช้ "if (db) return;" ซึ่งทำให้ reconnect ไม่ทำงานเพราะ db ยังมีค่าอยู่
+// แม้ connection จริงจะตายไปแล้ว
+let mongoConnected = false;
+
+function isMongoConnected() {
+    return mongoConnected === true;
+}
+
+mongo.on("serverHeartbeatSucceeded", () => {
+    mongoConnected = true;
+});
+
+mongo.on("serverHeartbeatFailed", () => {
+    mongoConnected = false;
+    scheduleDatabaseReconnect();
+});
+
+mongo.on("close", () => {
+    console.error("⚠️ MongoDB connection closed");
+    mongoConnected = false;
+    scheduleDatabaseReconnect();
+});
+
+mongo.on("error", error => {
+    console.error(
+        "⚠️ MongoDB client error:",
+        sanitizeErrorEarly(error)
+    );
+    mongoConnected = false;
+    scheduleDatabaseReconnect();
+});
+
+mongo.on("topologyClosed", () => {
+    mongoConnected = false;
+    scheduleDatabaseReconnect();
+});
 
 // ======================================================
 // 6. ERROR SANITIZER
@@ -240,97 +375,143 @@ function sanitizeError(error) {
 // 7. CONNECT DATABASE
 // ======================================================
 
+// ป้องกันไม่ให้มีการเรียก connectDatabase() พร้อมกันหลายชุด
+// (เช่น background reconnect ชนกับ manual retry) ซึ่งจะทำให้เกิด
+// reconnect loop ซ้อนกันหลายตัวได้
+let connectDatabaseInFlight = false;
+
 async function connectDatabase(
     maxRetries = 5,
     retryDelay = 5000
 ) {
-    for (
-        let attempt = 1;
-        attempt <= maxRetries;
-        attempt++
-    ) {
-        try {
-            console.log(
-                `🔄 Connecting to MongoDB Atlas (${attempt}/${maxRetries})...`
-            );
-
-            await mongo.connect();
-
-            db = mongo.db("77community");
-
-            await db.command({
-                ping: 1
-            });
-
-            console.log("✅ MongoDB Ping successful");
-
-            guildSetups =
-                db.collection("guild_setups");
-
-            anonymousMessages =
-                db.collection("anonymous_messages");
-
-            await guildSetups.createIndex(
-                {
-                    guildId: 1
-                },
-                {
-                    unique: true
-                }
-            );
-
-            await anonymousMessages.createIndex({
-                guildId: 1,
-                createdAt: -1
-            });
-
-            await anonymousMessages.createIndex({
-                recipientId: 1,
-                replied: 1
-            });
-
-            console.log(
-                "✅ MongoDB connected & indexes ready"
-            );
-
-            return true;
-        } catch (error) {
-            console.error(
-                `❌ MongoDB attempt ${attempt} failed:`,
-                sanitizeError(error)
-            );
-
-            if (attempt === maxRetries) {
-                // สำคัญ: ห้ามให้ MongoDB ล่มพา Discord Bot ล่มไปด้วย
-                // Bot ยัง login และ register slash commands ได้ตามปกติ
-                // ฟีเจอร์ที่ต้องใช้ฐานข้อมูล (บันทึก setup, เก็บข้อความฝากบอก ฯลฯ)
-                // จะแจ้งผู้ใช้ว่าใช้งานไม่ได้ชั่วคราวแทนที่จะทำให้ทั้งบอทปิดตัว
-                console.error(
-                    "❌ ไม่สามารถเชื่อมต่อ MongoDB ได้หลังจากลองครบทุกครั้งแล้ว"
-                );
-                console.error(
-                    "   ⚠️ Discord Bot จะยัง login และ register slash commands ต่อไปตามปกติ"
-                );
-                console.error(
-                    "   ⚠️ แต่ฟีเจอร์ที่ต้องใช้ฐานข้อมูล (setup / setchannel / ฝากบอก) จะใช้งานไม่ได้จนกว่าจะเชื่อมต่อ MongoDB สำเร็จ"
-                );
-
-                scheduleDatabaseReconnect();
-
-                return false;
-            }
-
-            console.log(
-                `⏳ Retrying in ${retryDelay / 1000} seconds...`
-            );
-
-            await new Promise(resolve =>
-                setTimeout(resolve, retryDelay)
-            );
-        }
+    if (connectDatabaseInFlight) {
+        console.log(
+            "ℹ️ MongoDB กำลังเชื่อมต่ออยู่แล้ว ข้ามการเรียกซ้ำ"
+        );
+        return isMongoConnected();
     }
 
-    return false;
+    connectDatabaseInFlight = true;
+
+    try {
+        for (
+            let attempt = 1;
+            attempt <= maxRetries;
+            attempt++
+        ) {
+            try {
+                console.log(
+                    `🔄 Connecting to MongoDB Atlas (${attempt}/${maxRetries})...`
+                );
+
+                await mongo.connect();
+
+                db = mongo.db("77community");
+
+                await db.command({
+                    ping: 1
+                });
+
+                console.log("✅ MongoDB Ping successful");
+
+                guildSetups =
+                    db.collection("guild_setups");
+
+                anonymousMessages =
+                    db.collection("anonymous_messages");
+
+                botGuildsCollection =
+                    db.collection("bot_guilds");
+
+                botStatsCollection =
+                    db.collection("bot_stats");
+
+                await guildSetups.createIndex(
+                    {
+                        guildId: 1
+                    },
+                    {
+                        unique: true
+                    }
+                );
+
+                await anonymousMessages.createIndex({
+                    guildId: 1,
+                    createdAt: -1
+                });
+
+                await anonymousMessages.createIndex({
+                    recipientId: 1,
+                    replied: 1
+                });
+
+                await botGuildsCollection.createIndex(
+                    {
+                        guildId: 1
+                    },
+                    {
+                        unique: true
+                    }
+                );
+
+                await botStatsCollection.createIndex(
+                    {
+                        key: 1
+                    },
+                    {
+                        unique: true
+                    }
+                );
+
+                console.log(
+                    "✅ MongoDB connected & indexes ready"
+                );
+
+                mongoConnected = true;
+
+                return true;
+            } catch (error) {
+                mongoConnected = false;
+
+                console.error(
+                    `❌ MongoDB attempt ${attempt} failed:`,
+                    sanitizeError(error)
+                );
+
+                if (attempt === maxRetries) {
+                    // สำคัญ: ห้ามให้ MongoDB ล่มพา Discord Bot ล่มไปด้วย
+                    // Bot ยัง login และ register slash commands ได้ตามปกติ
+                    // ฟีเจอร์ที่ต้องใช้ฐานข้อมูล (บันทึก setup, เก็บข้อความฝากบอก ฯลฯ)
+                    // จะแจ้งผู้ใช้ว่าใช้งานไม่ได้ชั่วคราวแทนที่จะทำให้ทั้งบอทปิดตัว
+                    console.error(
+                        "❌ ไม่สามารถเชื่อมต่อ MongoDB ได้หลังจากลองครบทุกครั้งแล้ว"
+                    );
+                    console.error(
+                        "   ⚠️ Discord Bot จะยัง login และ register slash commands ต่อไปตามปกติ"
+                    );
+                    console.error(
+                        "   ⚠️ แต่ฟีเจอร์ที่ต้องใช้ฐานข้อมูล (setup / setchannel / ฝากบอก) จะใช้งานไม่ได้จนกว่าจะเชื่อมต่อ MongoDB สำเร็จ"
+                    );
+
+                    scheduleDatabaseReconnect();
+
+                    return false;
+                }
+
+                console.log(
+                    `⏳ Retrying in ${retryDelay / 1000} seconds...`
+                );
+
+                await new Promise(resolve =>
+                    setTimeout(resolve, retryDelay)
+                );
+            }
+        }
+
+        return false;
+    } finally {
+        connectDatabaseInFlight = false;
+    }
 }
 
 // ======================================================
@@ -339,19 +520,39 @@ async function connectDatabase(
 // ======================================================
 
 let reconnectScheduled = false;
+let reconnectAttemptCount = 0;
 
-function scheduleDatabaseReconnect(delayMs = 60000) {
+function scheduleDatabaseReconnect(delayMs) {
     if (reconnectScheduled) {
+        return;
+    }
+
+    if (isMongoConnected()) {
+        // connection จริงยังใช้งานได้ ไม่ต้อง schedule reconnect
         return;
     }
 
     reconnectScheduled = true;
 
+    // Exponential backoff: 1x, 2x, 4x, 8x... สูงสุด 5 นาที
+    // เพื่อไม่ให้ยิง request ไปที่ MongoDB Atlas ถี่เกินไปตอนมันล่มยาว
+    const baseDelay = delayMs || 15000;
+    const backoffDelay = Math.min(
+        baseDelay * Math.pow(2, reconnectAttemptCount),
+        5 * 60 * 1000
+    );
+
+    console.log(
+        `⏳ จะลองเชื่อมต่อ MongoDB ใหม่ในอีก ${Math.round(backoffDelay / 1000)} วินาที`
+    );
+
     setTimeout(async () => {
         reconnectScheduled = false;
 
-        if (db) {
-            // เชื่อมต่อสำเร็จไปแล้วจากที่อื่นระหว่างรอ
+        // ตรวจสอบ connection จริงแทนการเช็คแค่ว่าตัวแปร db มีค่าอยู่หรือไม่
+        // เพราะ db อาจยังชี้ไป object เดิมแม้ connection จริงจะตายไปแล้ว
+        if (isMongoConnected()) {
+            reconnectAttemptCount = 0;
             return;
         }
 
@@ -359,8 +560,16 @@ function scheduleDatabaseReconnect(delayMs = 60000) {
             "🔄 กำลังลองเชื่อมต่อ MongoDB อีกครั้งใน background..."
         );
 
-        await connectDatabase();
-    }, delayMs);
+        reconnectAttemptCount += 1;
+
+        const success = await connectDatabase(1, 0);
+
+        if (success) {
+            reconnectAttemptCount = 0;
+        } else {
+            scheduleDatabaseReconnect(baseDelay);
+        }
+    }, backoffDelay);
 }
 
 // ======================================================
@@ -377,6 +586,52 @@ const client = new Client({
     partials: [
         Partials.Channel
     ]
+});
+
+// ======================================================
+// 8B. DISCORD CLIENT RESILIENCE
+// ป้องกันไม่ให้ Bot crash จาก error ธรรมดาของ Discord Gateway/API
+// (disconnect ชั่วคราว, rate limit, shard error ฯลฯ)
+// discord.js เองมี auto-reconnect ของ Gateway อยู่แล้ว หน้าที่ของ handler พวกนี้
+// คือแค่ log ให้เห็นสถานะ ไม่ใช่ไปเขียน logic reconnect ซ้ำเอง
+// ======================================================
+
+client.on(Events.Error, error => {
+    console.error(
+        "⚠️ Discord Client Error:",
+        sanitizeErrorEarly(error)
+    );
+});
+
+client.on(Events.Warn, info => {
+    console.warn("⚠️ Discord Client Warning:", info);
+});
+
+client.on(Events.ShardDisconnect, (event, shardId) => {
+    console.error(
+        `⚠️ Discord Shard ${shardId} disconnected (code: ${event?.code ?? "unknown"})`
+    );
+});
+
+client.on(Events.ShardReconnecting, shardId => {
+    console.log(`🔄 Discord Shard ${shardId} กำลัง reconnect...`);
+});
+
+client.on(Events.ShardResume, shardId => {
+    console.log(`✅ Discord Shard ${shardId} resumed`);
+});
+
+client.on(Events.ShardError, (error, shardId) => {
+    console.error(
+        `⚠️ Discord Shard ${shardId} error:`,
+        sanitizeErrorEarly(error)
+    );
+});
+
+client.rest.on("rateLimited", info => {
+    console.warn(
+        `⚠️ Discord API Rate Limited: route=${info?.route ?? "unknown"} timeout=${info?.timeToReset ?? "?"}ms`
+    );
 });
 
 // ======================================================
@@ -411,7 +666,27 @@ const commands = [
         .setDefaultMemberPermissions(
             PermissionFlagsBits.Administrator
         )
-        .setDMPermission(false)
+        .setDMPermission(false),
+
+    // หมายเหตุ: /stats, /servers, /botstats ไม่ได้ตั้ง setDefaultMemberPermissions
+    // เป็น Administrator เพราะ Owner ของบอทอาจไม่ใช่ Admin ในทุกเซิร์ฟเวอร์ที่บอทอยู่
+    // การจำกัดสิทธิ์ทำที่ระดับ interaction.user.id === process.env.BOT_OWNER_ID
+    // ตอน execute เท่านั้น (ดู isBotOwner) — ห้ามพึ่งพา Discord permission system
+    // สำหรับคำสั่งกลุ่มนี้ เพราะ Owner ต้องใช้ได้ไม่ว่าจะอยู่ role ไหนก็ตาม
+    new SlashCommandBuilder()
+        .setName("owner-1")
+        .setDescription("...")
+        .setDMPermission(true),
+
+    new SlashCommandBuilder()
+        .setName("owner-2")
+        .setDescription("...")
+        .setDMPermission(true),
+
+    new SlashCommandBuilder()
+        .setName("owner-3")
+        .setDescription("...")
+        .setDMPermission(true)
 ].map(command => command.toJSON());
 
 // ======================================================
@@ -885,6 +1160,379 @@ async function editAnonymousChannelMessage(
 }
 
 // ======================================================
+// 15B. GLOBAL STATS (in-memory counter + periodic flush)
+// ไม่เขียน MongoDB ทุก Interaction — นับใน memory แล้ว flush เป็นระยะแทน
+// ======================================================
+
+let commandsUsedCounter = 0;
+let statsFlushInterval = null;
+
+function incrementCommandsUsed() {
+    commandsUsedCounter += 1;
+}
+
+async function flushGlobalStats() {
+    if (!botStatsCollection) {
+        return;
+    }
+
+    if (commandsUsedCounter === 0) {
+        return;
+    }
+
+    const incrementBy = commandsUsedCounter;
+    commandsUsedCounter = 0;
+
+    try {
+        await botStatsCollection.updateOne(
+            { key: "global" },
+            {
+                $inc: {
+                    commandsUsed: incrementBy
+                },
+                $set: {
+                    guildCount: client.guilds.cache.size,
+                    totalMembers: getTotalMemberCount(),
+                    updatedAt: new Date()
+                }
+            },
+            { upsert: true }
+        );
+    } catch (error) {
+        // ถ้า flush ไม่สำเร็จ ให้บวกตัวนับกลับคืน เพื่อไม่ให้ข้อมูลหาย
+        commandsUsedCounter += incrementBy;
+
+        console.error(
+            "⚠️ Flush global stats error:",
+            sanitizeError(error)
+        );
+    }
+}
+
+async function getCommandsUsedTotal() {
+    if (!botStatsCollection) {
+        return commandsUsedCounter;
+    }
+
+    try {
+        const doc = await botStatsCollection.findOne({
+            key: "global"
+        });
+
+        return (doc?.commandsUsed || 0) + commandsUsedCounter;
+    } catch (error) {
+        console.error(
+            "⚠️ Read global stats error:",
+            sanitizeError(error)
+        );
+
+        return commandsUsedCounter;
+    }
+}
+
+function startStatsFlushInterval() {
+    if (statsFlushInterval) {
+        clearInterval(statsFlushInterval);
+    }
+
+    statsFlushInterval = setInterval(() => {
+        flushGlobalStats().catch(() => {});
+    }, 5 * 60 * 1000);
+}
+
+// ======================================================
+// 15C. GUILD STATS PERSISTENCE (bot_guilds collection)
+// อัปเดตตอน Ready / guildCreate / guildDelete เท่านั้น ไม่เขียนทุกวินาที
+// ======================================================
+
+// Cache invite URL ต่อ guild ในหน่วยความจำ กัน createInvite ซ้ำทุกครั้งที่เรียก /servers
+const inviteUrlCache = new Map();
+
+async function getOrCreateGuildInvite(guild) {
+    if (inviteUrlCache.has(guild.id)) {
+        return inviteUrlCache.get(guild.id);
+    }
+
+    try {
+        const me = guild.members.me;
+
+        if (
+            !me ||
+            !me.permissions.has(
+                PermissionFlagsBits.CreateInstantInvite
+            )
+        ) {
+            return null;
+        }
+
+        const existingInvites = await guild
+            .invites.fetch()
+            .catch(() => null);
+
+        let invite = existingInvites?.find(
+            inv => inv.inviter?.id === client.user.id
+        );
+
+        if (!invite) {
+            const targetChannel = guild.channels.cache.find(
+                channel =>
+                    channel.isTextBased() &&
+                    !channel.isThread() &&
+                    channel
+                        .permissionsFor(me)
+                        ?.has(
+                            PermissionFlagsBits.CreateInstantInvite
+                        )
+            );
+
+            if (!targetChannel) {
+                return null;
+            }
+
+            invite = await targetChannel
+                .createInvite({
+                    maxAge: 0,
+                    maxUses: 0,
+                    unique: false
+                })
+                .catch(() => null);
+        }
+
+        if (!invite) {
+            return null;
+        }
+
+        const url = `https://discord.gg/${invite.code}`;
+
+        inviteUrlCache.set(guild.id, url);
+
+        return url;
+    } catch (error) {
+        console.error(
+            "⚠️ Create invite error:",
+            sanitizeError(error)
+        );
+
+        return null;
+    }
+}
+
+async function upsertGuildStats(guild) {
+    if (!botGuildsCollection || !guild) {
+        return;
+    }
+
+    try {
+        const inviteUrl = await getOrCreateGuildInvite(guild);
+
+        await botGuildsCollection.updateOne(
+            { guildId: guild.id },
+            {
+                $set: {
+                    guildId: guild.id,
+                    guildName: guild.name,
+                    memberCount: guild.memberCount || 0,
+                    iconUrl: guild.iconURL() || null,
+                    inviteUrl: inviteUrl || null,
+                    updatedAt: new Date()
+                },
+                $setOnInsert: {
+                    joinedAt: guild.joinedAt || new Date()
+                }
+            },
+            { upsert: true }
+        );
+    } catch (error) {
+        console.error(
+            "⚠️ Upsert guild stats error:",
+            sanitizeError(error)
+        );
+    }
+}
+
+async function removeGuildStats(guildId) {
+    inviteUrlCache.delete(guildId);
+
+    if (!botGuildsCollection || !guildId) {
+        return;
+    }
+
+    try {
+        await botGuildsCollection.deleteOne({ guildId });
+    } catch (error) {
+        console.error(
+            "⚠️ Remove guild stats error:",
+            sanitizeError(error)
+        );
+    }
+}
+
+async function syncAllGuildStats() {
+    if (!botGuildsCollection) {
+        return;
+    }
+
+    // ทำทีละ guild แบบ sequential เพื่อไม่ยิง MongoDB write/Discord API พร้อมกันจำนวนมาก
+    // (สำคัญบน Render Free ที่ CPU/Network จำกัด)
+    for (const guild of client.guilds.cache.values()) {
+        await upsertGuildStats(guild);
+    }
+}
+
+// ======================================================
+// 15D. BOT PRESENCE ROTATION
+// สลับข้อความ "Watching X Servers" / "Watching X Members" ทุก ~15 วินาที
+// โดยใช้ client.guilds.cache เท่านั้น ไม่ fetch สมาชิกเพิ่ม
+// ======================================================
+
+function getTotalMemberCount() {
+    return client.guilds.cache.reduce(
+        (total, guild) => total + (guild.memberCount || 0),
+        0
+    );
+}
+
+let presenceInterval = null;
+let presenceShowingMembers = false;
+
+function updatePresenceOnce() {
+    try {
+        const serverCount = client.guilds.cache.size;
+        const memberCount = getTotalMemberCount();
+
+        const text = presenceShowingMembers
+            ? `👥 ${memberCount.toLocaleString()} Members`
+            : `🏠 ${serverCount.toLocaleString()} Servers`;
+
+        presenceShowingMembers = !presenceShowingMembers;
+
+        client.user?.setActivity(text, {
+            type: 3 // Watching
+        });
+    } catch (error) {
+        console.error(
+            "⚠️ Update presence error:",
+            sanitizeError(error)
+        );
+    }
+}
+
+function startPresenceRotation() {
+    // สำคัญ: ต้อง clear interval เดิมก่อนเสมอ ป้องกันไม่ให้เกิด interval
+    // ซ้อนกันหลายตัวจากการเรียกจากหลาย event (ready / guildCreate / guildDelete)
+    if (presenceInterval) {
+        clearInterval(presenceInterval);
+        presenceInterval = null;
+    }
+
+    updatePresenceOnce();
+
+    presenceInterval = setInterval(
+        updatePresenceOnce,
+        15000
+    );
+}
+
+// ======================================================
+// 15E. STATS / SERVERS HELPERS
+// ======================================================
+
+function formatUptime(totalSeconds) {
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+
+    const parts = [];
+
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    parts.push(`${seconds}s`);
+
+    return parts.join(" ");
+}
+
+const SERVERS_PER_PAGE = 5;
+
+async function buildServersPage(page) {
+    const guilds = Array.from(client.guilds.cache.values());
+
+    const totalPages = Math.max(
+        1,
+        Math.ceil(guilds.length / SERVERS_PER_PAGE)
+    );
+
+    const safePage = Math.min(
+        Math.max(page, 0),
+        totalPages - 1
+    );
+
+    const start = safePage * SERVERS_PER_PAGE;
+    const pageGuilds = guilds.slice(
+        start,
+        start + SERVERS_PER_PAGE
+    );
+
+    const embed = new EmbedBuilder()
+        .setColor("#FEE75C")
+        .setTitle("🗂️ Server List (Owner Only)")
+        .setFooter({
+            text: `Page ${safePage + 1} / ${totalPages} • ${guilds.length} servers total`
+        })
+        .setTimestamp();
+
+    if (pageGuilds.length === 0) {
+        embed.setDescription("ไม่มีเซิร์ฟเวอร์");
+    }
+
+    for (const guild of pageGuilds) {
+        // ใช้ invite ที่ cache ไว้แทนการสร้างใหม่ทุกครั้งที่เรียก /servers
+        let inviteUrl = inviteUrlCache.get(guild.id);
+
+        if (inviteUrl === undefined) {
+            inviteUrl = await getOrCreateGuildInvite(guild);
+        }
+
+        embed.addFields({
+            name: `${guild.name}`,
+            value: [
+                `👥 Members: ${(guild.memberCount || 0).toLocaleString()}`,
+                `🆔 Guild ID: \`${guild.id}\``,
+                `🔗 Invite: ${inviteUrl ? inviteUrl : "Invite unavailable"}`
+            ].join("\n"),
+            inline: false
+        });
+    }
+
+    const components = [];
+
+    if (totalPages > 1) {
+        components.push(
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(
+                        `servers_page:${safePage - 1}`
+                    )
+                    .setLabel("Previous")
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(safePage === 0),
+
+                new ButtonBuilder()
+                    .setCustomId(
+                        `servers_page:${safePage + 1}`
+                    )
+                    .setLabel("Next")
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(safePage >= totalPages - 1)
+            )
+        );
+    }
+
+    return { embed, components };
+}
+
+// ======================================================
 // 16. STARTUP
 // ======================================================
 
@@ -910,6 +1558,21 @@ client.once(
 
             await registerCommands();
 
+            // เริ่ม Presence rotation (ครอบคลุมทุก Guild ที่บอทอยู่)
+            startPresenceRotation();
+
+            // เริ่ม interval flush global stats เป็นระยะ (ไม่เขียนทุก interaction)
+            startStatsFlushInterval();
+
+            // Sync ข้อมูล Guild ลง MongoDB (bot_guilds) — ทำแบบไม่บล็อก ready event
+            // เผื่อ MongoDB ยังเชื่อมต่อไม่เสร็จตอนนี้
+            syncAllGuildStats().catch(error => {
+                console.error(
+                    "⚠️ Initial guild stats sync error:",
+                    sanitizeError(error)
+                );
+            });
+
             console.log(
                 "🚀 Bot is fully ready and operational!"
             );
@@ -925,6 +1588,41 @@ client.once(
 );
 
 // ======================================================
+// 16B. GUILD JOIN / LEAVE
+// อัปเดต Presence + Guild Stats เมื่อบอทเข้า/ออกจากเซิร์ฟเวอร์
+// ======================================================
+
+client.on(Events.GuildCreate, async guild => {
+    console.log(
+        `➕ Joined guild: ${guild.name} (${guild.id})`
+    );
+
+    startPresenceRotation();
+
+    await upsertGuildStats(guild).catch(error => {
+        console.error(
+            "⚠️ guildCreate stats error:",
+            sanitizeError(error)
+        );
+    });
+});
+
+client.on(Events.GuildDelete, async guild => {
+    console.log(
+        `➖ Left guild: ${guild.name} (${guild.id})`
+    );
+
+    startPresenceRotation();
+
+    await removeGuildStats(guild.id).catch(error => {
+        console.error(
+            "⚠️ guildDelete stats error:",
+            sanitizeError(error)
+        );
+    });
+});
+
+// ======================================================
 // 17. INTERACTION HANDLER
 // ======================================================
 
@@ -932,6 +1630,279 @@ client.on(
     Events.InteractionCreate,
     async interaction => {
         try {
+
+            if (interaction.isChatInputCommand()) {
+                incrementCommandsUsed();
+            }
+
+            // ==================================================
+            // /stats — OWNER ONLY
+            // ==================================================
+
+            if (
+                interaction.isChatInputCommand() &&
+                interaction.commandName === "stats"
+            ) {
+                // ตรวจสอบ Owner ก่อนทำอะไรทั้งสิ้น ห้าม query ข้อมูลใดๆ ก่อนผ่านจุดนี้
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                await interaction.deferReply({
+                    ephemeral: true
+                });
+
+                const totalServers =
+                    client.guilds.cache.size;
+
+                // ผลรวมสมาชิกของ "ทุก" เซิร์ฟเวอร์ที่บอทอยู่ — ไม่ใช่ Unique Members
+                // (คนเดียวกันอาจอยู่หลายเซิร์ฟเวอร์ได้ จึงนับซ้ำได้)
+                const totalMembersSum =
+                    getTotalMemberCount();
+
+                const commandsUsedTotal =
+                    await getCommandsUsedTotal();
+
+                const memoryUsageMb = (
+                    process.memoryUsage().rss /
+                    1024 /
+                    1024
+                ).toFixed(1);
+
+                const uptimeSeconds = Math.floor(
+                    process.uptime()
+                );
+
+                const statsEmbed = new EmbedBuilder()
+                    .setColor("#5865F2")
+                    .setTitle("📊 Bot Statistics")
+                    .addFields(
+                        {
+                            name: "🏠 Total Servers",
+                            value: totalServers.toLocaleString(),
+                            inline: true
+                        },
+                        {
+                            name: "👥 Total Members (sum across servers)",
+                            value: totalMembersSum.toLocaleString(),
+                            inline: true
+                        },
+                        {
+                            name: "⚡ Bot Status",
+                            value: "Online",
+                            inline: true
+                        },
+                        {
+                            name: "⏱️ Uptime",
+                            value: formatUptime(uptimeSeconds),
+                            inline: true
+                        },
+                        {
+                            name: "🤖 Discord Connection",
+                            value: client.isReady()
+                                ? "Connected"
+                                : "Disconnected",
+                            inline: true
+                        },
+                        {
+                            name: "🗄️ MongoDB Status",
+                            value: isMongoConnected()
+                                ? "Connected"
+                                : "Disconnected",
+                            inline: true
+                        },
+                        {
+                            name: "📊 Commands Used",
+                            value: commandsUsedTotal.toLocaleString(),
+                            inline: true
+                        },
+                        {
+                            name: "💾 Memory Usage",
+                            value: `${memoryUsageMb} MB`,
+                            inline: true
+                        },
+                        {
+                            name: "🕐 Last Updated",
+                            value: `<t:${Math.floor(Date.now() / 1000)}:R>`,
+                            inline: true
+                        }
+                    )
+                    .setFooter({ text: "LevelingX" })
+                    .setTimestamp();
+
+                return interaction.editReply({
+                    embeds: [statsEmbed]
+                });
+            }
+
+            // ==================================================
+            // /botstats — OWNER ONLY
+            // ==================================================
+
+            if (
+                interaction.isChatInputCommand() &&
+                interaction.commandName === "botstats"
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                await interaction.deferReply({
+                    ephemeral: true
+                });
+
+                const totalServers =
+                    client.guilds.cache.size;
+
+                const totalMembersSum =
+                    getTotalMemberCount();
+
+                const commandsUsedTotal =
+                    await getCommandsUsedTotal();
+
+                const memoryUsageMb = (
+                    process.memoryUsage().rss /
+                    1024 /
+                    1024
+                ).toFixed(1);
+
+                const uptimeSeconds = Math.floor(
+                    process.uptime()
+                );
+
+                // ไม่เปิดเผย Token / Mongo URI / Environment Variables / Password / Secrets ใดๆ
+                const botStatsEmbed = new EmbedBuilder()
+                    .setColor("#57F287")
+                    .setTitle("🤖 Bot Deep Stats (Owner Only)")
+                    .addFields(
+                        {
+                            name: "Servers",
+                            value: totalServers.toLocaleString(),
+                            inline: true
+                        },
+                        {
+                            name: "Total Members",
+                            value: totalMembersSum.toLocaleString(),
+                            inline: true
+                        },
+                        {
+                            name: "Uptime",
+                            value: formatUptime(uptimeSeconds),
+                            inline: true
+                        },
+                        {
+                            name: "Discord Status",
+                            value: client.isReady()
+                                ? "Connected"
+                                : "Disconnected",
+                            inline: true
+                        },
+                        {
+                            name: "MongoDB Status",
+                            value: isMongoConnected()
+                                ? "Connected"
+                                : "Disconnected",
+                            inline: true
+                        },
+                        {
+                            name: "Commands Used",
+                            value: commandsUsedTotal.toLocaleString(),
+                            inline: true
+                        },
+                        {
+                            name: "Memory",
+                            value: `${memoryUsageMb} MB`,
+                            inline: true
+                        },
+                        {
+                            name: "Node.js Version",
+                            value: process.version,
+                            inline: true
+                        },
+                        {
+                            name: "Discord.js Version",
+                            value:
+                                require("discord.js").version ||
+                                "unknown",
+                            inline: true
+                        },
+                        {
+                            name: "Bot Ping",
+                            value: `${Math.round(client.ws.ping)}ms`,
+                            inline: true
+                        }
+                    )
+                    .setFooter({ text: "LevelingX Bot" })
+                    .setTimestamp();
+
+                return interaction.editReply({
+                    embeds: [botStatsEmbed]
+                });
+            }
+
+            // ==================================================
+            // /servers — OWNER ONLY (with pagination)
+            // ==================================================
+
+            if (
+                interaction.isChatInputCommand() &&
+                interaction.commandName === "servers"
+            ) {
+                // ตรวจสอบ Owner ก่อน — ห้าม query/ส่ง Server List ก่อนผ่านจุดนี้
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                await interaction.deferReply({
+                    ephemeral: true
+                });
+
+                const { embed, components } =
+                    await buildServersPage(0);
+
+                return interaction.editReply({
+                    embeds: [embed],
+                    components
+                });
+            }
+
+            // ==================================================
+            // BUTTON: servers pagination (servers_page:<page>)
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith(
+                    "servers_page:"
+                )
+            ) {
+                // สำคัญ: ห้ามเชื่อว่าคนกดปุ่มคือคนเดียวกับที่เรียก /servers
+                // ต้องตรวจ BOT_OWNER_ID ใหม่ทุกครั้งที่มีการกดปุ่ม
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const targetPage = parseInt(
+                    interaction.customId.slice(
+                        "servers_page:".length
+                    ),
+                    10
+                );
+
+                await interaction.deferUpdate();
+
+                const { embed, components } =
+                    await buildServersPage(
+                        Number.isFinite(targetPage)
+                            ? targetPage
+                            : 0
+                    );
+
+                return interaction.editReply({
+                    embeds: [embed],
+                    components
+                });
+            }
 
             // ==================================================
             // /setup
@@ -956,7 +1927,7 @@ client.on(
                 ) {
                     return interaction.reply({
                         content:
-                            "คำสั่งนี้ใช้ได้เฉพาะคนที่มีสิทธิ์ผู้ดูแล",
+                            "คำสั่งนี้ใช้ได้เฉพาะหัวดิส",
                         ephemeral: true
                     });
                 }
@@ -1117,7 +2088,7 @@ client.on(
                 ) {
                     return interaction.reply({
                         content:
-                            "คำสั่งนี้ใช้ได้เฉพาะคนที่มีสิทธิ์ผู้ดูแล",
+                            "คำสั่งนี้ใช้ได้เฉพาะหัวดิส",
                         ephemeral: true
                     });
                 }
@@ -1219,7 +2190,7 @@ client.on(
                 ) {
                     return interaction.reply({
                         content:
-                            "ระบบฝากบอกยังไม่ได้ตั้งค่าช่องปลายทาง\nกรุณาให้คนที่มีสิทธิ์ผู้ดูแลใช้ `/setchannel` ก่อน",
+                            "ระบบฝากบอกยังไม่ได้ตั้งค่าช่องปลายทาง\nกรุณาให้หัวดิสใช้ `/setchannel` ก่อน",
                         ephemeral: true
                     });
                 }
@@ -1665,7 +2636,7 @@ client.on(
                             "reply"
                         )
                         .setLabel(
-                            "ข้อความตอบกลับ (สูงสุด 1024 ตัวอักษร)"
+                            "ข้อความตอบกลับ"
                         )
                         .setStyle(
                             TextInputStyle.Paragraph
@@ -1969,6 +2940,7 @@ client.on(
 process.on(
     "unhandledRejection",
     error => {
+        // Promise rejection ธรรมดาไม่ควรทำให้บอทล่มทั้งตัว — แค่ log ไว้
         console.error(
             "❌ Unhandled Promise Rejection:",
             sanitizeError(error)
@@ -1979,9 +2951,105 @@ process.on(
 process.on(
     "uncaughtException",
     error => {
+        // Uncaught exception หมายความว่า process อยู่ในสถานะที่ไม่แน่นอนแล้ว
+        // การพยายามทำงานต่อไปอาจไม่ปลอดภัย จึง log แล้ว exit เพื่อให้ Render
+        // restart process ให้ใหม่ (fatal error ที่กู้คืนเองไม่ได้)
         console.error(
-            "❌ Uncaught Exception:",
+            "❌ Uncaught Exception (fatal, exiting):",
+            sanitizeError(error)
+        );
+
+        process.exit(1);
+    }
+);
+
+// ======================================================
+// 20. GRACEFUL SHUTDOWN
+// รองรับ SIGINT / SIGTERM — หยุด interval, background job, ปิด MongoDB,
+// ปิด Discord Client, ปิด HTTP Server ตามลำดับ และป้องกันไม่ให้ทำงานซ้ำ
+// ======================================================
+
+let shuttingDown = false;
+
+async function gracefulShutdown(signal) {
+    if (shuttingDown) {
+        return;
+    }
+
+    shuttingDown = true;
+
+    console.log(
+        `🛑 ได้รับสัญญาณ ${signal} — กำลังปิดระบบอย่างปลอดภัย...`
+    );
+
+    // 1. หยุด interval ทั้งหมด
+    if (presenceInterval) {
+        clearInterval(presenceInterval);
+        presenceInterval = null;
+    }
+
+    if (statsFlushInterval) {
+        clearInterval(statsFlushInterval);
+        statsFlushInterval = null;
+    }
+
+    // 2. Flush global stats ที่ค้างอยู่ใน memory ก่อนปิด (best-effort)
+    try {
+        await flushGlobalStats();
+    } catch (error) {
+        console.error(
+            "⚠️ Shutdown: flush stats error:",
             sanitizeError(error)
         );
     }
-);
+
+    // 3. ปิด MongoDB connection
+    try {
+        await mongo.close();
+        mongoConnected = false;
+        console.log("✅ ปิดการเชื่อมต่อ MongoDB แล้ว");
+    } catch (error) {
+        console.error(
+            "⚠️ Shutdown: MongoDB close error:",
+            sanitizeError(error)
+        );
+    }
+
+    // 4. ปิด Discord Client
+    try {
+        client.destroy();
+        console.log("✅ ปิดการเชื่อมต่อ Discord Client แล้ว");
+    } catch (error) {
+        console.error(
+            "⚠️ Shutdown: Discord client destroy error:",
+            sanitizeError(error)
+        );
+    }
+
+    // 5. ปิด HTTP Server
+    try {
+        await new Promise((resolve, reject) => {
+            httpServer.close(error => {
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve();
+                }
+            });
+        });
+
+        console.log("✅ ปิด HTTP Server แล้ว");
+    } catch (error) {
+        console.error(
+            "⚠️ Shutdown: HTTP server close error:",
+            sanitizeError(error)
+        );
+    }
+
+    console.log("👋 ปิดระบบเรียบร้อยแล้ว");
+
+    process.exit(0);
+}
+
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
