@@ -365,17 +365,57 @@ mongo.on("topologyClosed", () => {
 // 6. ERROR SANITIZER
 // ======================================================
 
+function scrubMongoCredentials(text) {
+    return String(text ?? "").replace(
+        /mongodb(?:\+srv)?:\/\/[^@]+@/g,
+        "mongodb+srv://<CREDENTIALS_HIDDEN>@"
+    );
+}
+
+// sanitizeError: คืนข้อความ Error แบบสั้น (ไม่มี Mongo credentials) ใช้แสดงผลทั่วไป
 function sanitizeError(error) {
     if (!error) {
         return "Unknown Error";
     }
 
-    let message = error.message || String(error);
+    return scrubMongoCredentials(error.message || String(error));
+}
 
-    return message.replace(
-        /mongodb(?:\+srv)?:\/\/[^@]+@/g,
-        "mongodb+srv://<CREDENTIALS_HIDDEN>@"
-    );
+// logDetailedError: ใช้ตอน Log ลง Render สำหรับจุดที่ต้องการรายละเอียดครบ
+// (ชื่อคำสั่ง/ขั้นตอน, message, code, HTTP status, รายละเอียดจาก Discord API,
+// stack trace) ตามข้อกำหนด — ไม่ใช้ค่าที่ฟังก์ชันนี้คืนไปแสดงให้ผู้ใช้เห็นเด็ดขาด
+function logDetailedError(context, error) {
+    if (!error) {
+        console.error(`❌ [${context}] Unknown Error (no error object)`);
+        return;
+    }
+
+    const parts = [`❌ [${context}]`];
+
+    parts.push(`message=${scrubMongoCredentials(error.message || String(error))}`);
+
+    if (error.code !== undefined) {
+        parts.push(`code=${error.code}`);
+    }
+
+    const httpStatus = error.status ?? error.httpStatus;
+    if (httpStatus !== undefined) {
+        parts.push(`httpStatus=${httpStatus}`);
+    }
+
+    if (error.rawError) {
+        try {
+            parts.push(`discordApi=${scrubMongoCredentials(JSON.stringify(error.rawError))}`);
+        } catch {
+            // ignore stringify failure
+        }
+    }
+
+    console.error(parts.join(" | "));
+
+    if (error.stack) {
+        console.error(scrubMongoCredentials(error.stack));
+    }
 }
 
 // ======================================================
@@ -1723,9 +1763,16 @@ function isValidHttpUrl(value) {
 }
 
 const ANNOUNCE_TITLE_MAX = 256;
-const ANNOUNCE_DESCRIPTION_MAX = 4096;
-const ANNOUNCE_UPDATE_LIST_MAX = 3000; // เผื่อพื้นที่ใน description รวม title+list ไม่เกิน 4096
+const ANNOUNCE_DESCRIPTION_MAX = 4096; // ขีดจำกัดจริงของ Embed Description (ใช้กับ safeTruncate/Embed เท่านั้น)
+// Discord Modal Text Input (TextInputBuilder) จำกัด max_length ไว้ที่ 4000 เท่านั้น
+// (ไม่ใช่ 4096 แบบ Embed Description) — ถ้าใช้ ANNOUNCE_DESCRIPTION_MAX (4096) กับ
+// TextInputBuilder.setMaxLength() โดยตรง discord.js จะ throw ทันทีตอนสร้าง Modal
+// (ก่อนถึง interaction.showModal() ด้วยซ้ำ) ทำให้ /announce ขึ้น "เกิดข้อผิดพลาด"
+// นี่คือสาเหตุจริงของบัค /announce ที่รายงานมา — ต้องแยกค่านี้ออกจากกันให้ชัดเจน
+const ANNOUNCE_MODAL_DESCRIPTION_MAX = 4000;
+const ANNOUNCE_UPDATE_LIST_MAX = 900; // ต้องพอดีกับ Field Value (1024) รวมกับบรรทัดวันที่อัตโนมัติและ code fence
 const ANNOUNCE_PINK = "#FF69B4";
+const UPDATE_FIELD_NAME = "📢 อัปเดตล่าสุด";
 
 // ======================================================
 // 15G. COOLDOWNS
@@ -1774,9 +1821,10 @@ const broadcastLocks = {
 
 const PERMANENT_DISCORD_ERROR_CODES = new Set([
     10001, // Unknown Account
-    10004, // Unknown Guild
     10003, // Unknown Channel
+    10004, // Unknown Guild
     10007, // Unknown Member
+    10008, // Unknown Message (เช่น Panel ของ /setup ถูกลบไปแล้ว — ใช้กับ /update)
     10013, // Unknown User
     50001, // Missing Access
     50007, // Cannot send messages to this user (DM ปิด/บล็อกบอท)
@@ -1990,10 +2038,7 @@ async function safeFetchGuildMembers(guild) {
     try {
         return await guild.members.fetch();
     } catch (error) {
-        console.error(
-            `⚠️ Fetch members error (${guild.id}):`,
-            sanitizeError(error)
-        );
+        logDetailedError(`Announce: fetch members (guild ${guild.id})`, error);
 
         return guild.members.cache;
     }
@@ -2074,29 +2119,63 @@ function buildAnnounceEmbed(draft) {
     return embed;
 }
 
-function buildUpdateEmbed(draft) {
-    const listBlock =
-        draft.updateList && draft.updateList.trim()
-            ? `\n\n\`\`\`\n${safeTruncate(draft.updateList.trim(), ANNOUNCE_UPDATE_LIST_MAX)}\n\`\`\``
-            : "";
+// วันที่/เวลาปัจจุบัน (Asia/Bangkok) รูปแบบไทยสำหรับแปะไว้ใน Field อัปเดตอัตโนมัติ
+function formatThaiDateTime(date = new Date()) {
+    return date.toLocaleString("th-TH", {
+        timeZone: "Asia/Bangkok",
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit"
+    });
+}
 
-    const embed = new EmbedBuilder()
-        .setColor(ANNOUNCE_PINK)
-        .setTitle(`✦ ${safeTruncate(draft.title, ANNOUNCE_TITLE_MAX - 2)} ✦`)
-        .setDescription(
-            safeTruncate(
-                `${draft.description}${listBlock}`,
-                ANNOUNCE_DESCRIPTION_MAX
-            )
-        )
-        .setFooter({
-            text: UI_CONFIG.embed.footer || "Developer : tin.py"
-        })
-        .setTimestamp();
+// สร้างเนื้อหาของ Field "📢 อัปเดตล่าสุด" — เฉพาะรายการอัปเดต + วันที่อัปเดตอัตโนมัติ
+// เท่านั้น (ไม่มี Title/Description/Image แยก เพราะซ้ำซ้อนกับ Embed หลักของ /setup
+// อยู่แล้ว) ใช้ safeField ตัดให้ไม่เกิน 1024 ตัวอักษร (ขีดจำกัดจริงของ Embed Field Value)
+function buildUpdateFieldValue(draft) {
+    const dateLine = `อัปเดตล่าสุด: ${formatThaiDateTime()}`;
+    const listBlock = draft.updateList ? draft.updateList.trim() : "";
 
-    if (draft.image) {
-        embed.setImage(draft.image);
-    }
+    // เผื่อพื้นที่ให้บรรทัดวันที่แสดงเสมอ (ไม่ถูกตัดหายไปตอนใกล้ขีดจำกัด 1024
+    // ตัวอักษรของ Field Value) โดยตัดเฉพาะส่วนรายการอัปเดตถ้ายาวเกินพื้นที่ที่เหลือ
+    const wrapperLength = "```\n\n```\n".length;
+    const maxListLength = Math.max(
+        0,
+        1024 - wrapperLength - dateLine.length - 3
+    );
+
+    const truncatedList =
+        listBlock.length > maxListLength
+            ? listBlock.slice(0, maxListLength) + "..."
+            : listBlock;
+
+    return `\`\`\`\n${truncatedList}\n\`\`\`\n${dateLine}`;
+}
+
+// merge Field "📢 อัปเดตล่าสุด" เข้ากับ Embed หลักของ /setup ที่มีอยู่เดิม (baseEmbedData
+// คือ embed data จากข้อความ Panel จริง หรือ null ถ้าไม่มี ให้ fallback เป็น buildMainEmbed())
+// - แทนที่ Field เดิมชื่อเดียวกัน (ถ้ามี) ด้วยอันใหม่ทุกครั้ง (กรอบเดิม ไม่สะสม ไม่ซ้ำ)
+// - เก็บ Field/เนื้อหาอื่นของ Panel เดิมไว้ทั้งหมด และให้ Field นี้อยู่ล่างสุดเสมอ
+// - วันที่อัปเดตจะถูกคำนวณใหม่อัตโนมัติทุกครั้งที่เรียกฟังก์ชันนี้ (ดู buildUpdateFieldValue)
+function buildUpdatedPanelEmbed(baseEmbedData, draft) {
+    const embed = baseEmbedData
+        ? EmbedBuilder.from(baseEmbedData)
+        : buildMainEmbed();
+
+    const existingFields = (embed.data.fields || []).filter(
+        field => field.name !== UPDATE_FIELD_NAME
+    );
+
+    embed.setFields([
+        ...existingFields,
+        {
+            name: UPDATE_FIELD_NAME,
+            value: buildUpdateFieldValue(draft),
+            inline: false
+        }
+    ]);
 
     return embed;
 }
@@ -2122,12 +2201,12 @@ function buildAnnouncePreviewEmbed(draft, audienceInfo) {
                 inline: true
             },
             {
-                name: "title)",
+                name: "Title",
                 value: safeField(draft.title),
                 inline: false
             },
             {
-                name: "description",
+                name: "Description",
                 value: safeField(draft.description),
                 inline: false
             },
@@ -2150,16 +2229,6 @@ function buildUpdatePreviewEmbed(draft, targetGuildCount) {
                 name: "จำนวนเซิร์ฟเวอร์ที่ตั้งค่าระบบฝากบอกไว้",
                 value: String(targetGuildCount),
                 inline: true
-            },
-            {
-                name: "title)",
-                value: safeField(draft.title),
-                inline: false
-            },
-            {
-                name: "description)",
-                value: safeField(draft.description),
-                inline: false
             },
             {
                 name: "รายการอัปเดต",
@@ -2731,7 +2800,7 @@ client.on(
                             .setLabel("Description")
                             .setStyle(TextInputStyle.Paragraph)
                             .setRequired(true)
-                            .setMaxLength(ANNOUNCE_DESCRIPTION_MAX)
+                            .setMaxLength(ANNOUNCE_MODAL_DESCRIPTION_MAX)
                     ),
                     new ActionRowBuilder().addComponents(
                         new TextInputBuilder()
@@ -2867,7 +2936,7 @@ client.on(
                             .setLabel("Description")
                             .setStyle(TextInputStyle.Paragraph)
                             .setRequired(true)
-                            .setMaxLength(ANNOUNCE_DESCRIPTION_MAX)
+                            .setMaxLength(ANNOUNCE_MODAL_DESCRIPTION_MAX)
                             .setValue(session.draft.description)
                     ),
                     new ActionRowBuilder().addComponents(
@@ -3086,10 +3155,7 @@ client.on(
                             durationSeconds
                         })
                     );
-                    console.error(
-                        "Announce final report edit error:",
-                        sanitizeError(error)
-                    );
+                    logDetailedError("Announce: final report edit", error);
                 });
             }
 
@@ -3133,22 +3199,6 @@ client.on(
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(
                         new TextInputBuilder()
-                            .setCustomId("title")
-                            .setLabel("Title")
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(true)
-                            .setMaxLength(ANNOUNCE_TITLE_MAX - 2)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("description")
-                            .setLabel("Description")
-                            .setStyle(TextInputStyle.Paragraph)
-                            .setRequired(true)
-                            .setMaxLength(1000)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
                             .setCustomId("updateList")
                             .setLabel("รายการอัปเดต (บรรทัดละ 1 รายการ)")
                             .setStyle(TextInputStyle.Paragraph)
@@ -3157,14 +3207,6 @@ client.on(
                             .setPlaceholder(
                                 "[ + ] เพิ่มฟีเจอร์ใหม่\n[ ~ ] ปรับปรุงระบบเดิม\n[ - ] แก้ไขบั๊ก"
                             )
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("image")
-                            .setLabel("Image URL (ไม่ใส่ก็ได้)")
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(false)
-                            .setMaxLength(500)
                     )
                 );
 
@@ -3183,53 +3225,30 @@ client.on(
                     return;
                 }
 
-                const title = sanitizeAnnounceText(
-                    interaction.fields.getTextInputValue("title")
-                );
-
-                const description = sanitizeAnnounceText(
-                    interaction.fields.getTextInputValue("description")
-                );
-
                 const updateList = sanitizeAnnounceText(
                     interaction.fields.getTextInputValue("updateList")
                 );
 
-                const image = interaction.fields
-                    .getTextInputValue("image")
-                    .trim();
-
-                if (!title || !description || !updateList) {
+                if (!updateList) {
                     return interaction.reply({
-                        content:
-                            "กรุณากรอก Title, Description และรายการอัปเดตให้ครบ",
-                        ephemeral: true
-                    });
-                }
-
-                if (!isValidHttpUrl(image)) {
-                    return interaction.reply({
-                        content:
-                            "Image URL ไม่ถูกต้อง กรุณาใส่ URL ที่ขึ้นต้นด้วย http:// หรือ https://",
+                        content: "กรุณากรอกรายการอัปเดต",
                         ephemeral: true
                     });
                 }
 
                 await interaction.deferReply({ ephemeral: true });
 
-                const draft = { title, description, updateList, image };
+                const draft = { updateList };
 
                 let targetGuildCount = 0;
 
                 try {
                     targetGuildCount = await guildSetups.countDocuments({
-                        panelChannelId: { $exists: true, $ne: null }
+                        panelChannelId: { $exists: true, $ne: null },
+                        panelMessageId: { $exists: true, $ne: null }
                     });
                 } catch (error) {
-                    console.error(
-                        "Update: count target guilds error:",
-                        sanitizeError(error)
-                    );
+                    logDetailedError("Update: count target guilds", error);
                 }
 
                 const sessionId = makeSessionId();
@@ -3243,7 +3262,7 @@ client.on(
                 return interaction.editReply({
                     embeds: [
                         buildUpdatePreviewEmbed(draft, targetGuildCount),
-                        buildUpdateEmbed(draft)
+                        buildUpdatedPanelEmbed(null, draft)
                     ],
                     components: [
                         buildConfirmCancelEditRow("update", sessionId)
@@ -3284,39 +3303,12 @@ client.on(
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(
                         new TextInputBuilder()
-                            .setCustomId("title")
-                            .setLabel("Title")
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(true)
-                            .setMaxLength(ANNOUNCE_TITLE_MAX - 2)
-                            .setValue(session.draft.title)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("description")
-                            .setLabel("Description")
-                            .setStyle(TextInputStyle.Paragraph)
-                            .setRequired(true)
-                            .setMaxLength(1000)
-                            .setValue(session.draft.description)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
                             .setCustomId("updateList")
                             .setLabel("รายการอัปเดต (บรรทัดละ 1 รายการ)")
                             .setStyle(TextInputStyle.Paragraph)
                             .setRequired(true)
                             .setMaxLength(ANNOUNCE_UPDATE_LIST_MAX)
                             .setValue(session.draft.updateList)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("image")
-                            .setLabel("Image URL (ไม่ใส่ก็ได้)")
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(false)
-                            .setMaxLength(500)
-                            .setValue(session.draft.image || "")
                     )
                 );
 
@@ -3425,21 +3417,21 @@ client.on(
                 });
 
                 const startedAt = Date.now();
-                const embed = buildUpdateEmbed(session.draft);
 
+                // /update ต้องแก้ไข Embed หลักของ /setup (panelChannelId +
+                // panelMessageId) ในข้อความเดิมเท่านั้น — ห้ามส่ง Embed ใหม่แยก,
+                // ห้ามส่ง DM, ห้ามสร้างข้อความใหม่ทุกครั้งที่อัปเดต
                 let targetGuilds = [];
 
                 try {
                     targetGuilds = await guildSetups
                         .find({
-                            panelChannelId: { $exists: true, $ne: null }
+                            panelChannelId: { $exists: true, $ne: null },
+                            panelMessageId: { $exists: true, $ne: null }
                         })
                         .toArray();
                 } catch (error) {
-                    console.error(
-                        "Update: fetch target guilds error:",
-                        sanitizeError(error)
-                    );
+                    logDetailedError("Update: fetch target guilds", error);
                 }
 
                 const tasks = targetGuilds.map(setup => ({
@@ -3459,42 +3451,23 @@ client.on(
                             );
                         }
 
-                        // ถ้าเคยส่งแจ้งอัปเดตในเซิร์ฟเวอร์นี้มาก่อน ให้ Sync (แก้ไข)
-                        // Embed เดิมแทนการส่งใหม่ซ้ำซ้อน — แยก Embed นี้ออกจาก
-                        // Embed หลักของระบบฝากบอกอย่างชัดเจน (คนละข้อความ คนละ message id)
-                        if (
-                            setup.lastUpdateChannelId ===
-                                setup.panelChannelId &&
-                            setup.lastUpdateMessageId
-                        ) {
-                            const edited = await editAnonymousChannelMessage(
-                                setup.panelChannelId,
-                                setup.lastUpdateMessageId,
-                                embed,
-                                [],
-                                1
-                            );
+                        const panelMessage = await channel.messages.fetch(
+                            setup.panelMessageId
+                        );
 
-                            if (edited) {
-                                return;
-                            }
-                            // ถ้า edit ไม่สำเร็จ (message ถูกลบไปแล้ว) ให้ตกไปส่งใหม่ด้านล่าง
-                        }
+                        // merge Field "📢 อัปเดตล่าสุด" เข้ากับ Embed หลักของ Panel เดิม
+                        // (แทนที่ Field เดิมถ้ามี ไม่สะสม ไม่ลบเนื้อหาอื่นของ /setup)
+                        const mergedEmbed = buildUpdatedPanelEmbed(
+                            panelMessage.embeds[0] || null,
+                            session.draft
+                        );
 
-                        const sentMessage = await channel.send({
-                            embeds: [embed],
-                            allowedMentions: { parse: [] }
+                        // แก้ไขข้อความเดิมด้วย message.edit() เท่านั้น และคงปุ่ม
+                        // Components เดิมของ Panel ไว้ทั้งหมด
+                        await panelMessage.edit({
+                            embeds: [mergedEmbed],
+                            components: panelMessage.components
                         });
-
-                        await guildSetups.updateOne(
-                            { guildId: setup.guildId },
-                            {
-                                $set: {
-                                    lastUpdateChannelId: channel.id,
-                                    lastUpdateMessageId: sentMessage.id
-                                }
-                            }
-                        ).catch(() => {});
                     }
                 }));
 
@@ -3565,10 +3538,7 @@ client.on(
                             durationSeconds
                         })
                     );
-                    console.error(
-                        "Update final report edit error:",
-                        sanitizeError(error)
-                    );
+                    logDetailedError("Update: final report edit", error);
                 });
             }
 
@@ -4942,9 +4912,15 @@ client.on(
             }
 
         } catch (error) {
-            console.error(
-                "❌ Interaction Error:",
-                sanitizeError(error)
+            const interactionContext =
+                interaction.commandName ||
+                interaction.customId ||
+                interaction.type ||
+                "unknown-interaction";
+
+            logDetailedError(
+                `Interaction Error: ${interactionContext}`,
+                error
             );
 
             const errorMessage = {
@@ -4953,17 +4929,23 @@ client.on(
                 ephemeral: true
             };
 
-            if (
-                interaction.replied ||
-                interaction.deferred
-            ) {
-                await interaction.editReply(
-                    errorMessage
-                ).catch(() => {});
-            } else {
-                await interaction.reply(
-                    errorMessage
-                ).catch(() => {});
+            try {
+                if (
+                    interaction.replied ||
+                    interaction.deferred
+                ) {
+                    await interaction.editReply(errorMessage);
+                } else {
+                    await interaction.reply(errorMessage);
+                }
+            } catch (replyError) {
+                // Interaction อาจหมดอายุแล้ว (เช่น token หมดอายุ ~15 นาที
+                // หรือ Unknown interaction) — log ไว้แทนเพื่อไม่ให้ error หายไปเฉยๆ
+                // และไม่พยายามตอบซ้ำจนเกิด error เพิ่ม
+                logDetailedError(
+                    `Interaction Error Reply Failed: ${interactionContext}`,
+                    replyError
+                );
             }
         }
     }
