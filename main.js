@@ -811,6 +811,10 @@ async function registerCommands() {
         console.log(
             `   คำสั่งที่ลงทะเบียน: ${result.map(c => "/" + c.name).join(", ")}`
         );
+        console.log("   Command ID:");
+        result.forEach(c => {
+            console.log(`     /${c.name} → ${c.id}`);
+        });
         console.log(
             "   ℹ️ Global Commands อาจใช้เวลาสักพัก (โดยทั่วไปไม่กี่นาที แต่บางครั้งนานถึง ~1 ชม.) กว่าจะกระจายไปครบทุก Server — ไม่ต้อง register ซ้ำ แค่รอ"
         );
@@ -2140,7 +2144,8 @@ function buildUpdateFieldValue(draft) {
 
     // เผื่อพื้นที่ให้บรรทัดวันที่แสดงเสมอ (ไม่ถูกตัดหายไปตอนใกล้ขีดจำกัด 1024
     // ตัวอักษรของ Field Value) โดยตัดเฉพาะส่วนรายการอัปเดตถ้ายาวเกินพื้นที่ที่เหลือ
-    const wrapperLength = "```\n\n```\n".length;
+    // — บรรทัดวันที่อยู่ในกรอบ code block เดียวกับรายการอัปเดต (ไม่แยกออกนอกกรอบ)
+    const wrapperLength = "```\n\n\n```".length;
     const maxListLength = Math.max(
         0,
         1024 - wrapperLength - dateLine.length - 3
@@ -2151,7 +2156,7 @@ function buildUpdateFieldValue(draft) {
             ? listBlock.slice(0, maxListLength) + "..."
             : listBlock;
 
-    return `\`\`\`\n${truncatedList}\n\`\`\`\n${dateLine}`;
+    return `\`\`\`\n${truncatedList}\n${dateLine}\n\`\`\``;
 }
 
 // merge Field "📢 อัปเดตล่าสุด" เข้ากับ Embed หลักของ /setup ที่มีอยู่เดิม (baseEmbedData
@@ -2704,6 +2709,10 @@ client.on(
 
             if (interaction.isChatInputCommand()) {
                 incrementCommandsUsed();
+
+                console.log(
+                    `▶️ /${interaction.commandName} | Command ID: ${interaction.commandId} | User: ${interaction.user.id} | Guild: ${interaction.guildId ?? "DM"}`
+                );
             }
 
             // ==================================================
