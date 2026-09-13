@@ -15,10 +15,12 @@ const {
     ButtonBuilder,
     ButtonStyle,
     UserSelectMenuBuilder,
+    StringSelectMenuBuilder,
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
-    EmbedBuilder
+    EmbedBuilder,
+    AuditLogEvent
 } = require("discord.js");
 
 const {
@@ -38,9 +40,9 @@ const UI_CONFIG = {
             "มีอะไรอยู่ในใจ แต่ไม่กล้าบอก ลองใช้บอทตัวนี้เป็นตัวแทนในการบอกได้ โดยที่อีกฝ่ายจะไม่รู้ว่าเราคือใคร",
         color: "#FF69B4",
         image:
-            "https://cdn.discordapp.com/attachments/1539965115900629003/1542078143563833374/Ad3-7cdFqb0b5hwsLufYYwaUhdlfSM28Vt7DERCwPSw.gif?ex=6a8febaf&is=6a8e9a2f&hm=9d405dd201390abed9ca6df19f481a2c9215de5b39b44b108dda24beaf57785f&",
+            "https://cdn.discordapp.com/attachments/1547940188158693501/1548642382608863302/34cb014a-4252-4824-a25f-6950f143c613.gif?ex=6aa7cd1c&is=6aa67b9c&hm=231b55856606c7c0f7f853d82f1d5fe5073d5563d7d5617e289e9cc14cc1980e&",
         thumbnail: "",
-        footer: "LevelingX"
+        footer: "Developer : tin.py"
     },
 
     button: {
@@ -587,11 +589,19 @@ function scheduleDatabaseReconnect(delayMs) {
 // 8. DISCORD CLIENT
 // ======================================================
 
+// หมายเหตุสำคัญ (ฟีเจอร์ /announce, /update): เพิ่ม GatewayIntentBits.GuildMembers
+// เพราะระบบประกาศ DM ต้องคำนวณกลุ่มผู้รับ (สมาชิกทุกคน / Admin / Manage Guild /
+// เจ้าของเซิร์ฟเวอร์) จาก member cache ของแต่ละเซิร์ฟเวอร์ ซึ่งจำเป็นต้องมี Intent นี้
+// ไม่เช่นนั้น guild.members.cache จะมีแค่บอทเอง (หรือสมาชิกที่ cache ไว้จาก event อื่น)
+// *** สำคัญ: ต้องไปเปิด "SERVER MEMBERS INTENT" ที่ Discord Developer Portal ด้วย
+// (Developer Portal > Your App > Bot > Privileged Gateway Intents) ไม่งั้น client.login()
+// จะ throw error ทันที (Used disallowed intents) ***
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.DirectMessages
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMembers
     ],
 
     partials: [
@@ -710,6 +720,19 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName("owner-3")
+        .setDescription("...")
+        .setDMPermission(true),
+
+    // /announce, /update: เป็นคำสั่งลับสำหรับ Bot Owner เช่นเดียวกับ owner-1/2/3
+    // (การจำกัดสิทธิ์จริงทำที่ isBotOwner/rejectIfNotOwner ตอน execute เท่านั้น
+    // ไม่พึ่งพา setDefaultMemberPermissions เพราะ Owner อาจไม่ใช่ Admin ทุกเซิร์ฟเวอร์)
+    new SlashCommandBuilder()
+        .setName("announce")
+        .setDescription("...")
+        .setDMPermission(true),
+
+    new SlashCommandBuilder()
+        .setName("update")
         .setDescription("...")
         .setDMPermission(true)
 ].map(command => command.toJSON());
@@ -1660,6 +1683,844 @@ async function buildServersPage(page) {
 }
 
 // ======================================================
+// 15F. TEXT SANITIZATION / VALIDATION HELPERS
+// ใช้ร่วมกันสำหรับ /announce และ /update (ป้องกัน Mention Spam, ความยาวเกิน,
+// URL ไม่ถูกต้อง) — ไม่แตะฟังก์ชัน safeField เดิมที่ใช้กับระบบฝากบอก
+// ======================================================
+
+// ตัดข้อความยาวเกินอย่างปลอดภัย (ไม่ตัดกลาง surrogate pair ของ emoji)
+function safeTruncate(text, maxLength) {
+    const str = String(text ?? "");
+
+    if (str.length <= maxLength) {
+        return str;
+    }
+
+    return Array.from(str).slice(0, Math.max(0, maxLength - 3)).join("") + "...";
+}
+
+// ป้องกัน @everyone / @here / mass mention ที่ผู้ใช้พิมพ์เข้ามาใน Title/Description/รายการอัปเดต
+// (การส่งจริงทุกจุดใน 2 ฟีเจอร์นี้ใช้ allowedMentions: { parse: [] } อยู่แล้วเป็นชั้นป้องกันที่ 2)
+function sanitizeAnnounceText(text) {
+    return String(text ?? "")
+        .replace(/@everyone/gi, "@\u200beveryone")
+        .replace(/@here/gi, "@\u200bhere")
+        .trim();
+}
+
+function isValidHttpUrl(value) {
+    if (!value) {
+        return true; // field เป็น optional ปล่อยว่างได้
+    }
+
+    try {
+        const url = new URL(value);
+
+        return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+        return false;
+    }
+}
+
+const ANNOUNCE_TITLE_MAX = 256;
+const ANNOUNCE_DESCRIPTION_MAX = 4096;
+const ANNOUNCE_UPDATE_LIST_MAX = 3000; // เผื่อพื้นที่ใน description รวม title+list ไม่เกิน 4096
+const ANNOUNCE_PINK = "#FF69B4";
+
+// ======================================================
+// 15G. COOLDOWNS
+// Cooldown ต่อ User สำหรับคำสั่งที่มีผลกระทบวงกว้าง (/announce, /update)
+// และ Lock กันกดซ้อนระหว่างที่ Queue กำลังทำงานอยู่ (ต่อ feature ไม่ใช่ต่อ user
+// เพราะมีแค่ Bot Owner เท่านั้นที่ใช้ได้ และไม่ควรมี 2 งานพร้อมกันไม่ว่าใครจะกด)
+// ======================================================
+
+const commandCooldowns = new Map(); // key: `${userId}:${commandName}` -> timestamp ที่ใช้ได้อีกครั้ง
+
+function checkCooldown(userId, commandName, cooldownMs) {
+    const key = `${userId}:${commandName}`;
+    const now = Date.now();
+    const readyAt = commandCooldowns.get(key) || 0;
+
+    if (now < readyAt) {
+        return {
+            onCooldown: true,
+            remainingSeconds: Math.ceil((readyAt - now) / 1000)
+        };
+    }
+
+    commandCooldowns.set(key, now + cooldownMs);
+
+    return { onCooldown: false };
+}
+
+// Lock กันกด "ยืนยัน" ซ้อนกันหลายงานพร้อมกันสำหรับ /announce และ /update แยกกัน
+const broadcastLocks = {
+    announce: false,
+    update: false
+};
+
+// ======================================================
+// 15H. GENERIC DM / BROADCAST QUEUE
+// ใช้ร่วมกันทั้งระบบประกาศ DM (/announce) และระบบแจ้งอัปเดต (/update)
+// - จำกัด concurrency (ค่าเริ่มต้น 2 งานพร้อมกัน)
+// - Delay ปรับได้ระหว่างงาน
+// - ตรวจจับ HTTP 429 และใช้ retry_after จาก Discord
+// - Exponential backoff สำหรับข้อผิดพลาดชั่วคราว
+// - จำกัด retry ต่อ task (ค่าเริ่มต้น 2 ครั้ง)
+// - Pause อัตโนมัติเมื่อโดน rate limit ต่อเนื่องหลายครั้งติดกัน
+// - รองรับยกเลิกระหว่างทำงานผ่าน cancelToken
+// - ไม่ retry error ถาวร (Missing Permissions / Unknown User / Unknown Channel / บล็อก DM)
+// ======================================================
+
+const PERMANENT_DISCORD_ERROR_CODES = new Set([
+    10001, // Unknown Account
+    10004, // Unknown Guild
+    10003, // Unknown Channel
+    10007, // Unknown Member
+    10013, // Unknown User
+    50001, // Missing Access
+    50007, // Cannot send messages to this user (DM ปิด/บล็อกบอท)
+    50013  // Missing Permissions
+]);
+
+function isPermanentDiscordError(error) {
+    return PERMANENT_DISCORD_ERROR_CODES.has(error?.code);
+}
+
+function createCancelToken() {
+    return { cancelled: false };
+}
+
+/**
+ * runQueue: ประมวลผล tasks ทีละกลุ่มตาม concurrency ที่กำหนด
+ * @param {Array} tasks - รายการ task แต่ละตัวมี { id, run: async () => any }
+ * @param {Object} options
+ * @returns {Promise<{success:number, failed:number, skipped:number, rateLimited:number, results:Array}>}
+ */
+async function runQueue(tasks, options = {}) {
+    const {
+        concurrency = 2,
+        delayMs = 700,
+        maxRetries = 2,
+        cancelToken = createCancelToken(),
+        onProgress = null
+    } = options;
+
+    const results = [];
+    let successCount = 0;
+    let failedCount = 0;
+    let skippedCount = 0;
+    let rateLimitedCount = 0;
+    let consecutiveRateLimits = 0;
+    let cursor = 0;
+
+    async function processOne(task) {
+        let attempt = 0;
+        let lastError = null;
+
+        while (attempt <= maxRetries) {
+            if (cancelToken.cancelled) {
+                skippedCount += 1;
+                return { id: task.id, status: "skipped", reason: "cancelled" };
+            }
+
+            try {
+                await task.run();
+
+                consecutiveRateLimits = 0;
+
+                successCount += 1;
+
+                return { id: task.id, status: "success" };
+            } catch (error) {
+                lastError = error;
+
+                // 429 Rate Limit — เคารพ retry_after ที่ Discord ส่งมาเสมอ ห้ามฝืนส่งซ้ำทันที
+                const isRateLimit =
+                    error?.status === 429 ||
+                    error?.httpStatus === 429;
+
+                if (isRateLimit) {
+                    rateLimitedCount += 1;
+                    consecutiveRateLimits += 1;
+
+                    const retryAfterMs = Math.max(
+                        250,
+                        Math.round(
+                            (error?.retry_after ??
+                                error?.data?.retry_after ??
+                                1) * 1000
+                        )
+                    );
+
+                    // Pause งานทั้งคิวชั่วคราวถ้าโดน rate limit ติดกันหลายครั้ง —
+                    // ป้องกันการฝืนยิง API ต่อเนื่องตอน Discord กำลังจำกัดเราอยู่จริงๆ
+                    const pauseMs =
+                        consecutiveRateLimits >= 3
+                            ? retryAfterMs * 3
+                            : retryAfterMs;
+
+                    await new Promise(resolve =>
+                        setTimeout(resolve, pauseMs)
+                    );
+
+                    attempt += 1;
+                    continue;
+                }
+
+                if (isPermanentDiscordError(error)) {
+                    // Error ถาวร (ปิด DM / บล็อกบอท / ไม่มีสิทธิ์ ฯลฯ) — ห้าม retry
+                    failedCount += 1;
+
+                    return {
+                        id: task.id,
+                        status: "failed",
+                        permanent: true,
+                        reason: sanitizeError(error)
+                    };
+                }
+
+                // Error ชั่วคราวอื่นๆ — ใช้ exponential backoff แล้ว retry จนครบ maxRetries
+                attempt += 1;
+
+                if (attempt > maxRetries) {
+                    break;
+                }
+
+                const backoffMs =
+                    500 * Math.pow(2, attempt - 1);
+
+                await new Promise(resolve =>
+                    setTimeout(resolve, backoffMs)
+                );
+            }
+        }
+
+        failedCount += 1;
+
+        return {
+            id: task.id,
+            status: "failed",
+            reason: sanitizeError(lastError)
+        };
+    }
+
+    async function worker() {
+        while (cursor < tasks.length) {
+            if (cancelToken.cancelled) {
+                // ทำเครื่องหมายงานที่เหลือทั้งหมดว่าถูกข้าม (ยกเลิกระหว่างทำงาน)
+                while (cursor < tasks.length) {
+                    const skippedTask = tasks[cursor];
+                    cursor += 1;
+                    skippedCount += 1;
+                    results.push({
+                        id: skippedTask.id,
+                        status: "skipped",
+                        reason: "cancelled"
+                    });
+                }
+                break;
+            }
+
+            const index = cursor;
+            cursor += 1;
+
+            const task = tasks[index];
+
+            const result = await processOne(task);
+            results.push(result);
+
+            if (onProgress) {
+                try {
+                    onProgress({
+                        done: results.length,
+                        total: tasks.length,
+                        success: successCount,
+                        failed: failedCount,
+                        skipped: skippedCount,
+                        rateLimited: rateLimitedCount
+                    });
+                } catch {
+                    // ไม่ให้ error จาก callback progress ทำให้ queue หยุดทำงาน
+                }
+            }
+
+            if (!cancelToken.cancelled && delayMs > 0) {
+                await new Promise(resolve =>
+                    setTimeout(resolve, delayMs)
+                );
+            }
+        }
+    }
+
+    const workerCount = Math.max(
+        1,
+        Math.min(concurrency, tasks.length || 1)
+    );
+
+    await Promise.all(
+        Array.from({ length: workerCount }, () => worker())
+    );
+
+    return {
+        success: successCount,
+        failed: failedCount,
+        skipped: skippedCount,
+        rateLimited: rateLimitedCount,
+        results
+    };
+}
+
+// ======================================================
+// 15I. ANNOUNCE AUDIENCE HELPERS
+// คำนวณกลุ่มผู้รับตาม guild.members.cache (ต้องมี GuildMembers Intent)
+// ป้องกันสมาชิกซ้ำข้ามเซิร์ฟเวอร์ด้วย Set ของ user.id และไม่ส่งหาบอท
+// ======================================================
+
+const ANNOUNCE_AUDIENCES = {
+    all_members: "สมาชิกทุกคนในทุกเซิร์ฟเวอร์ที่บอทอยู่",
+    administrators: "เฉพาะสมาชิกที่มีสิทธิ์ผู้ดูแล",
+    manage_guild: "เฉพาะสมาชิกที่มีสิทธิ์จัดการเซิร์ฟเวอร์",
+    guild_owners: "เฉพาะเจ้าของเซิร์ฟเวอร์"
+};
+
+// พยายาม fetch member list ของ guild แบบปลอดภัย — ถ้าพลาด (เช่น Intent ไม่เปิด,
+// guild ใหญ่เกินไป, timeout) ให้คืน cache ที่มีอยู่แทนการทำให้ทั้งงานล้ม
+async function safeFetchGuildMembers(guild) {
+    try {
+        return await guild.members.fetch();
+    } catch (error) {
+        console.error(
+            `⚠️ Fetch members error (${guild.id}):`,
+            sanitizeError(error)
+        );
+
+        return guild.members.cache;
+    }
+}
+
+async function collectAnnounceRecipients(audience) {
+    const recipients = new Map(); // userId -> { id, guildCount }
+    let serverCount = 0;
+
+    for (const guild of client.guilds.cache.values()) {
+        serverCount += 1;
+
+        if (audience === "guild_owners") {
+            if (!guild.ownerId) {
+                continue;
+            }
+
+            if (!recipients.has(guild.ownerId)) {
+                recipients.set(guild.ownerId, { id: guild.ownerId });
+            }
+
+            continue;
+        }
+
+        const members = await safeFetchGuildMembers(guild);
+
+        for (const member of members.values()) {
+            if (member.user.bot) {
+                continue;
+            }
+
+            if (
+                audience === "administrators" &&
+                !member.permissions.has(PermissionFlagsBits.Administrator)
+            ) {
+                continue;
+            }
+
+            if (
+                audience === "manage_guild" &&
+                !member.permissions.has(PermissionFlagsBits.ManageGuild)
+            ) {
+                continue;
+            }
+
+            if (!recipients.has(member.id)) {
+                recipients.set(member.id, { id: member.id });
+            }
+        }
+    }
+
+    return {
+        serverCount,
+        recipients: Array.from(recipients.values())
+    };
+}
+
+// ======================================================
+// 15J. ANNOUNCE / UPDATE EMBED BUILDERS
+// ======================================================
+
+function buildAnnounceEmbed(draft) {
+    const embed = new EmbedBuilder()
+        .setColor(ANNOUNCE_PINK)
+        .setTitle(safeTruncate(draft.title, ANNOUNCE_TITLE_MAX))
+        .setDescription(
+            safeTruncate(draft.description, ANNOUNCE_DESCRIPTION_MAX)
+        )
+        .setFooter({
+            text: UI_CONFIG.embed.footer || "Developer : tin.py"
+        })
+        .setTimestamp();
+
+    if (draft.image) {
+        embed.setImage(draft.image);
+    }
+
+    return embed;
+}
+
+function buildUpdateEmbed(draft) {
+    const listBlock =
+        draft.updateList && draft.updateList.trim()
+            ? `\n\n\`\`\`\n${safeTruncate(draft.updateList.trim(), ANNOUNCE_UPDATE_LIST_MAX)}\n\`\`\``
+            : "";
+
+    const embed = new EmbedBuilder()
+        .setColor(ANNOUNCE_PINK)
+        .setTitle(`✦ ${safeTruncate(draft.title, ANNOUNCE_TITLE_MAX - 2)} ✦`)
+        .setDescription(
+            safeTruncate(
+                `${draft.description}${listBlock}`,
+                ANNOUNCE_DESCRIPTION_MAX
+            )
+        )
+        .setFooter({
+            text: UI_CONFIG.embed.footer || "Developer : tin.py"
+        })
+        .setTimestamp();
+
+    if (draft.image) {
+        embed.setImage(draft.image);
+    }
+
+    return embed;
+}
+
+function buildAnnouncePreviewEmbed(draft, audienceInfo) {
+    return new EmbedBuilder()
+        .setColor(ANNOUNCE_PINK)
+        .setTitle("ตรวจสอบก่อนส่งประกาศ")
+        .addFields(
+            {
+                name: "กลุ่มผู้รับ",
+                value: ANNOUNCE_AUDIENCES[draft.audience] || "ไม่ทราบ",
+                inline: false
+            },
+            {
+                name: "จำนวนเซิร์ฟเวอร์",
+                value: String(audienceInfo.serverCount),
+                inline: true
+            },
+            {
+                name: "จำนวนผู้รับ",
+                value: String(audienceInfo.recipients.length),
+                inline: true
+            },
+            {
+                name: "title)",
+                value: safeField(draft.title),
+                inline: false
+            },
+            {
+                name: "description",
+                value: safeField(draft.description),
+                inline: false
+            },
+            {
+                name: "⚠️ คำเตือน",
+                value:
+                    "การส่ง DM อาจล้มเหลวหากผู้รับปิดกั้น DM จากสมาชิกที่ไม่รู้จัก หรือบล็อกบอทไว้ ระบบจะข้ามผู้ใช้เหล่านั้นโดยอัตโนมัติและไม่ retry ซ้ำ",
+                inline: false
+            }
+        )
+        .setFooter({ text: "LevelingX • Owner Only" });
+}
+
+function buildUpdatePreviewEmbed(draft, targetGuildCount) {
+    return new EmbedBuilder()
+        .setColor(ANNOUNCE_PINK)
+        .setTitle("ตรวจสอบก่อนส่งแจ้งอัปเดต")
+        .addFields(
+            {
+                name: "จำนวนเซิร์ฟเวอร์ที่ตั้งค่าระบบฝากบอกไว้",
+                value: String(targetGuildCount),
+                inline: true
+            },
+            {
+                name: "title)",
+                value: safeField(draft.title),
+                inline: false
+            },
+            {
+                name: "description)",
+                value: safeField(draft.description),
+                inline: false
+            },
+            {
+                name: "รายการอัปเดต",
+                value: safeField(draft.updateList || "(ไม่มี)"),
+                inline: false
+            }
+        )
+        .setFooter({ text: "LevelingX • Owner Only" });
+}
+
+function buildConfirmCancelEditRow(prefix, sessionId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`${prefix}_confirm:${sessionId}`)
+            .setLabel("ยืนยันประกาศ")
+            .setEmoji("✅")
+            .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+            .setCustomId(`${prefix}_edit:${sessionId}`)
+            .setLabel("แก้ไข")
+            .setEmoji("✏️")
+            .setStyle(ButtonStyle.Secondary),
+
+        new ButtonBuilder()
+            .setCustomId(`${prefix}_cancel:${sessionId}`)
+            .setLabel("ยกเลิก")
+            .setEmoji("❌")
+            .setStyle(ButtonStyle.Danger)
+    );
+}
+
+function buildCancelOnlyRow(prefix, sessionId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`${prefix}_cancel_inflight:${sessionId}`)
+            .setLabel("ยกเลิกการส่งที่กำลังทำงานอยู่")
+            .setEmoji("🛑")
+            .setStyle(ButtonStyle.Danger)
+    );
+}
+
+// ======================================================
+// 15K. DRAFT SESSION STORAGE (in-memory)
+// เก็บ Draft ของ /announce, /update ระหว่างขั้นตอน Select → Modal → Preview → Confirm
+// เฉพาะ Bot Owner เท่านั้นที่เข้าถึงได้ (ตรวจซ้ำทุกจุด) จึง key ด้วย sessionId สุ่มพอ
+// เพื่อกันคนอื่นเดา customId มายุ่งกับ session ของ Owner ได้
+// ======================================================
+
+const announceSessions = new Map(); // sessionId -> { draft, cancelToken, createdAt }
+const updateSessions = new Map();
+
+function makeSessionId() {
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// เก็บกวาด session ที่ค้างนานเกินไป (เผื่อ Owner ปิดหน้าต่างทิ้งไว้เฉยๆ) กัน memory leak
+setInterval(() => {
+    const cutoff = Date.now() - 30 * 60 * 1000; // 30 นาที
+
+    for (const [id, session] of announceSessions.entries()) {
+        if (session.createdAt < cutoff) {
+            announceSessions.delete(id);
+        }
+    }
+
+    for (const [id, session] of updateSessions.entries()) {
+        if (session.createdAt < cutoff) {
+            updateSessions.delete(id);
+        }
+    }
+}, 5 * 60 * 1000);
+
+// ======================================================
+// 15L. AUTO SETUP (ใช้โดยปุ่ม "⚙️ ตั้งค่าระบบอัตโนมัติ" ตอน DM ต้อนรับ)
+// สร้าง Category + Text Channel + Panel ให้อัตโนมัติถ้ายังไม่เคย Setup
+// ป้องกันการกดซ้ำพร้อมกันด้วย Lock ต่อ Guild
+// ======================================================
+
+const guildAutoSetupLocks = new Set();
+
+async function runAutoGuildSetup(guild) {
+    if (guildAutoSetupLocks.has(guild.id)) {
+        return {
+            ok: false,
+            reason: "กำลังตั้งค่าระบบ กรุณารอสักครู่ค่ะ"
+        };
+    }
+
+    guildAutoSetupLocks.add(guild.id);
+
+    try {
+        const existingSetup = await getGuildSetup(guild.id);
+
+        // ถ้าตั้งค่าไปแล้วและ channel/panel ยังใช้งานได้จริง ห้ามสร้างซ้ำ
+        if (existingSetup?.targetChannelId) {
+            const existingChannel = await client.channels
+                .fetch(existingSetup.targetChannelId)
+                .catch(() => null);
+
+            if (existingChannel) {
+                return {
+                    ok: true,
+                    alreadySetup: true,
+                    channelId: existingChannel.id
+                };
+            }
+            // ถ้า fetch ไม่เจอ (ถูกลบไปแล้ว) ให้ทำ setup ใหม่ต่อไปด้านล่างตามปกติ
+        }
+
+        const me = guild.members.me;
+
+        if (
+            !me ||
+            !me.permissions.has(PermissionFlagsBits.ManageChannels)
+        ) {
+            return {
+                ok: false,
+                reason: "บอทไม่มีสิทธิ์ Manage Channels ในเซิร์ฟเวอร์นี้"
+            };
+        }
+
+        let category = null;
+
+        try {
+            category = await guild.channels.create({
+                name: "ระบบฝากบอก",
+                type: ChannelType.GuildCategory
+            });
+        } catch (error) {
+            console.error(
+                "Auto setup: create category error:",
+                sanitizeError(error)
+            );
+
+            return {
+                ok: false,
+                reason: "สร้างหมวดหมู่ไม่สำเร็จ (ตรวจสอบสิทธิ์บอท)"
+            };
+        }
+
+        let channel = null;
+
+        try {
+            channel = await guild.channels.create({
+                name: "ฝากบอก",
+                type: ChannelType.GuildText,
+                parent: category.id
+            });
+        } catch (error) {
+            console.error(
+                "Auto setup: create channel error:",
+                sanitizeError(error)
+            );
+
+            return {
+                ok: false,
+                reason: "สร้างช่องข้อความไม่สำเร็จ (ตรวจสอบสิทธิ์บอท)"
+            };
+        }
+
+        const embed = buildMainEmbed();
+        const button = buildMainButton();
+
+        let panelMessage = null;
+
+        try {
+            panelMessage = await channel.send({
+                embeds: [embed],
+                components: [button]
+            });
+        } catch (error) {
+            console.error(
+                "Auto setup: send panel error:",
+                sanitizeError(error)
+            );
+
+            return {
+                ok: false,
+                reason: "สร้างช่องสำเร็จ แต่ส่ง Embed หลักไม่สำเร็จ"
+            };
+        }
+
+        try {
+            await guildSetups.updateOne(
+                { guildId: guild.id },
+                {
+                    $set: {
+                        guildId: guild.id,
+                        panelChannelId: panelMessage.channelId,
+                        panelMessageId: panelMessage.id,
+                        targetChannelId: channel.id,
+                        updatedAt: new Date()
+                    }
+                },
+                { upsert: true }
+            );
+        } catch (error) {
+            console.error(
+                "Auto setup: DB save error:",
+                sanitizeError(error)
+            );
+
+            return {
+                ok: false,
+                reason:
+                    "สร้างช่องและ Embed สำเร็จ แต่บันทึกข้อมูลลง MongoDB ไม่สำเร็จ"
+            };
+        }
+
+        return {
+            ok: true,
+            alreadySetup: false,
+            channelId: channel.id
+        };
+    } finally {
+        guildAutoSetupLocks.delete(guild.id);
+    }
+}
+
+// ======================================================
+// 15M. WELCOME DM (guildCreate)
+// ======================================================
+
+function buildWelcomeEmbed(guild) {
+    return new EmbedBuilder()
+        .setColor(ANNOUNCE_PINK)
+        .setTitle("ขอบคุณที่เพิ่มบอท yume")
+        .setDescription(
+            "ขอบคุณที่เพิ่มบอทเข้าสู่เซิร์ฟเวอร์ของคุณ ตอนนี้บอทพร้อมใช้งานแล้ว " +
+                "กดปุ่มด้านล่างเพื่อเริ่มตั้งค่าระบบฝากบอกอัตโนมัติได้เลย"
+        )
+        .addFields(
+            {
+                name: "เซิร์ฟเวอร์",
+                value: safeField(guild.name),
+                inline: true
+            },
+            {
+                name: "จำนวนสมาชิกโดยประมาณ",
+                value: String(guild.memberCount || 0),
+                inline: true
+            }
+        )
+        .setFooter({ text: "Developer : tin.py" })
+        .setTimestamp();
+}
+
+function buildWelcomeButtons(guild) {
+    const inviteUrl =
+        `https://discord.com/api/oauth2/authorize?client_id=${CLIENT_ID}` +
+        `&permissions=${PermissionFlagsBits.Administrator}` +
+        `&scope=bot%20applications.commands`;
+
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`welcome_setup:${guild.id}`)
+            .setLabel("ตั้งค่าระบบ")
+            .setEmoji("⚙️")
+            .setStyle(ButtonStyle.Primary),
+
+        new ButtonBuilder()
+            .setCustomId("welcome_help")
+            .setLabel("วิธีใช้งาน")
+            .setEmoji("📖")
+            .setStyle(ButtonStyle.Secondary),
+
+        new ButtonBuilder()
+            .setLabel("เชิญบอท")
+            .setEmoji("🔗")
+            .setStyle(ButtonStyle.Link)
+            .setURL(inviteUrl)
+    );
+}
+
+// พยายามหาว่าใครเป็นคนเพิ่มบอทเข้ามาจาก Audit Log (ต้องมีสิทธิ์ View Audit Log)
+// ถ้าหาไม่ได้อย่างน่าเชื่อถือ (ไม่มีสิทธิ์ / entry ไม่ตรง / อายุเกิน) ให้คืน null
+// แล้วปล่อยให้ผู้เรียกใช้ fallback ไปหาเจ้าของเซิร์ฟเวอร์แทน — ห้ามเดาสุ่มเด็ดขาด
+async function findGuildAdderUserId(guild) {
+    try {
+        const me = guild.members.me;
+
+        if (
+            !me ||
+            !me.permissions.has(PermissionFlagsBits.ViewAuditLog)
+        ) {
+            return null;
+        }
+
+        const auditLogs = await guild.fetchAuditLogs({
+            type: AuditLogEvent.BotAdd,
+            limit: 5
+        });
+
+        const entry = auditLogs.entries.find(
+            log => log.target?.id === client.user.id
+        );
+
+        if (!entry || !entry.executor) {
+            return null;
+        }
+
+        // ตรวจว่า entry สดใหม่จริง (ภายใน 5 นาที) กันกรณีดึง log เก่าของการ add
+        // บอทตัวเดียวกันในอดีตที่เคย kick ออกแล้วเชิญกลับมาใหม่แต่ log ไม่ update
+        const isFresh =
+            Date.now() - entry.createdTimestamp < 5 * 60 * 1000;
+
+        if (!isFresh) {
+            return null;
+        }
+
+        return entry.executor.id;
+    } catch (error) {
+        console.error(
+            "⚠️ Audit log lookup error:",
+            sanitizeError(error)
+        );
+
+        return null;
+    }
+}
+
+async function sendWelcomeDm(guild) {
+    try {
+        let targetUserId = await findGuildAdderUserId(guild);
+
+        if (!targetUserId) {
+            targetUserId = guild.ownerId || null;
+        }
+
+        if (!targetUserId) {
+            console.log(
+                `ℹ️ guildCreate(${guild.id}): ไม่สามารถระบุผู้รับ DM ต้อนรับได้ ข้าม`
+            );
+            return;
+        }
+
+        const targetUser = await client.users
+            .fetch(targetUserId)
+            .catch(() => null);
+
+        if (!targetUser || targetUser.bot) {
+            return;
+        }
+
+        await targetUser.send({
+            embeds: [buildWelcomeEmbed(guild)],
+            components: [buildWelcomeButtons(guild)],
+            allowedMentions: { parse: [] }
+        });
+    } catch (error) {
+        // DM ส่งไม่ได้ (ปิด DM / บล็อกบอท) เป็นเรื่องปกติมาก — log แบบปลอดภัยแล้วปล่อยผ่าน
+        // ห้ามทำให้ guildCreate handler ทั้งตัวพังเพราะ DM ส่งไม่ได้
+        console.log(
+            `ℹ️ guildCreate(${guild.id}): ส่ง DM ต้อนรับไม่สำเร็จ:`,
+            sanitizeError(error)
+        );
+    }
+}
+
+// ======================================================
 // 16. STARTUP
 // ======================================================
 
@@ -1738,6 +2599,14 @@ client.on(Events.GuildCreate, async guild => {
             sanitizeError(error)
         );
     });
+
+    // DM ต้อนรับ — best-effort เท่านั้น ห้ามให้ error จุดนี้กระทบส่วนอื่นของ guildCreate
+    await sendWelcomeDm(guild).catch(error => {
+        console.error(
+            "⚠️ guildCreate welcome DM error:",
+            sanitizeError(error)
+        );
+    });
 });
 
 client.on(Events.GuildDelete, async guild => {
@@ -1766,6 +2635,1035 @@ client.on(
 
             if (interaction.isChatInputCommand()) {
                 incrementCommandsUsed();
+            }
+
+            // ==================================================
+            // /announce — OWNER ONLY (STEP 1: เลือกกลุ่มผู้รับ)
+            // ==================================================
+
+            if (
+                interaction.isChatInputCommand() &&
+                interaction.commandName === "announce"
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                if (broadcastLocks.announce) {
+                    return interaction.reply({
+                        content:
+                            "มีการส่งประกาศกำลังทำงานอยู่แล้ว กรุณารอให้เสร็จก่อน",
+                        ephemeral: true
+                    });
+                }
+
+                const cooldown = checkCooldown(
+                    interaction.user.id,
+                    "announce",
+                    30000
+                );
+
+                if (cooldown.onCooldown) {
+                    return interaction.reply({
+                        content: `กรุณารออีก ${cooldown.remainingSeconds} วินาทีก่อนใช้คำสั่งนี้อีกครั้ง`,
+                        ephemeral: true
+                    });
+                }
+
+                const audienceSelect = new StringSelectMenuBuilder()
+                    .setCustomId("announce_audience_select")
+                    .setPlaceholder("เลือกกลุ่มผู้รับประกาศ")
+                    .addOptions(
+                        Object.entries(ANNOUNCE_AUDIENCES).map(
+                            ([value, label]) => ({
+                                label: safeTruncate(label, 100),
+                                value
+                            })
+                        )
+                    );
+
+                return interaction.reply({
+                    content: "เลือกกลุ่มผู้รับที่ต้องการส่งประกาศ",
+                    components: [
+                        new ActionRowBuilder().addComponents(audienceSelect)
+                    ],
+                    ephemeral: true
+                });
+            }
+
+            // ==================================================
+            // SELECT: announce_audience_select (STEP 2: กรอก Embed)
+            // ==================================================
+
+            if (
+                interaction.isStringSelectMenu() &&
+                interaction.customId === "announce_audience_select"
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const audience = interaction.values[0];
+
+                if (!ANNOUNCE_AUDIENCES[audience]) {
+                    return interaction.update({
+                        content: "กลุ่มผู้รับไม่ถูกต้อง กรุณาลองใหม่ด้วย /announce",
+                        components: []
+                    });
+                }
+
+                const modal = new ModalBuilder()
+                    .setCustomId(`announce_modal:${audience}`)
+                    .setTitle("ระบบประกาศ DM");
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("title")
+                            .setLabel("Title")
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(true)
+                            .setMaxLength(ANNOUNCE_TITLE_MAX)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("description")
+                            .setLabel("Description")
+                            .setStyle(TextInputStyle.Paragraph)
+                            .setRequired(true)
+                            .setMaxLength(ANNOUNCE_DESCRIPTION_MAX)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("image")
+                            .setLabel("Image URL (ไม่ใส่ก็ได้)")
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(false)
+                            .setMaxLength(500)
+                    )
+                );
+
+                return interaction.showModal(modal);
+            }
+
+            // ==================================================
+            // MODAL: announce_modal:<audience> (STEP 3: Preview)
+            // ==================================================
+
+            if (
+                interaction.isModalSubmit() &&
+                interaction.customId.startsWith("announce_modal:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const audience = interaction.customId.slice(
+                    "announce_modal:".length
+                );
+
+                if (!ANNOUNCE_AUDIENCES[audience]) {
+                    return interaction.reply({
+                        content: "กลุ่มผู้รับไม่ถูกต้อง กรุณาลองใหม่ด้วย /announce",
+                        ephemeral: true
+                    });
+                }
+
+                const title = sanitizeAnnounceText(
+                    interaction.fields.getTextInputValue("title")
+                );
+
+                const description = sanitizeAnnounceText(
+                    interaction.fields.getTextInputValue("description")
+                );
+
+                const image = interaction.fields
+                    .getTextInputValue("image")
+                    .trim();
+
+                if (!title || !description) {
+                    return interaction.reply({
+                        content: "กรุณากรอก Title และ Description",
+                        ephemeral: true
+                    });
+                }
+
+                if (!isValidHttpUrl(image)) {
+                    return interaction.reply({
+                        content: "Image URL ไม่ถูกต้อง กรุณาใส่ URL ที่ขึ้นต้นด้วย http:// หรือ https://",
+                        ephemeral: true
+                    });
+                }
+
+                await interaction.deferReply({ ephemeral: true });
+
+                const draft = { audience, title, description, image };
+
+                const audienceInfo = await collectAnnounceRecipients(audience);
+
+                const sessionId = makeSessionId();
+
+                announceSessions.set(sessionId, {
+                    draft,
+                    audienceInfo,
+                    cancelToken: null,
+                    createdAt: Date.now()
+                });
+
+                return interaction.editReply({
+                    embeds: [
+                        buildAnnouncePreviewEmbed(draft, audienceInfo),
+                        buildAnnounceEmbed(draft)
+                    ],
+                    components: [
+                        buildConfirmCancelEditRow("announce", sessionId)
+                    ]
+                });
+            }
+
+            // ==================================================
+            // BUTTON: announce_edit:<sessionId>
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("announce_edit:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const sessionId = interaction.customId.slice(
+                    "announce_edit:".length
+                );
+
+                const session = announceSessions.get(sessionId);
+
+                if (!session) {
+                    return interaction.update({
+                        content: "Session หมดอายุแล้ว กรุณาเริ่มใหม่ด้วย /announce",
+                        embeds: [],
+                        components: []
+                    });
+                }
+
+                const modal = new ModalBuilder()
+                    .setCustomId(`announce_modal:${session.draft.audience}`)
+                    .setTitle("ระบบประกาศ DM (แก้ไข)");
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("title")
+                            .setLabel("Title")
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(true)
+                            .setMaxLength(ANNOUNCE_TITLE_MAX)
+                            .setValue(session.draft.title)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("description")
+                            .setLabel("Description")
+                            .setStyle(TextInputStyle.Paragraph)
+                            .setRequired(true)
+                            .setMaxLength(ANNOUNCE_DESCRIPTION_MAX)
+                            .setValue(session.draft.description)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("image")
+                            .setLabel("Image URL (ไม่ใส่ก็ได้)")
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(false)
+                            .setMaxLength(500)
+                            .setValue(session.draft.image || "")
+                    )
+                );
+
+                announceSessions.delete(sessionId);
+
+                return interaction.showModal(modal);
+            }
+
+            // ==================================================
+            // BUTTON: announce_cancel:<sessionId>
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("announce_cancel:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const sessionId = interaction.customId.slice(
+                    "announce_cancel:".length
+                );
+
+                announceSessions.delete(sessionId);
+
+                return interaction.update({
+                    content: "ยกเลิกการประกาศแล้ว",
+                    embeds: [],
+                    components: []
+                });
+            }
+
+            // ==================================================
+            // BUTTON: announce_cancel_inflight:<sessionId> (ยกเลิกระหว่างส่ง)
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("announce_cancel_inflight:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const sessionId = interaction.customId.slice(
+                    "announce_cancel_inflight:".length
+                );
+
+                const session = announceSessions.get(sessionId);
+
+                if (session?.cancelToken) {
+                    session.cancelToken.cancelled = true;
+                }
+
+                return interaction.update({
+                    content: "กำลังยกเลิก... งานที่ค้างอยู่ในคิวจะถูกข้าม",
+                    components: []
+                });
+            }
+
+            // ==================================================
+            // BUTTON: announce_confirm:<sessionId> (STEP 4: ส่งจริง)
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("announce_confirm:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                if (broadcastLocks.announce) {
+                    return interaction.reply({
+                        content: "มีการส่งประกาศกำลังทำงานอยู่แล้ว",
+                        ephemeral: true
+                    });
+                }
+
+                const sessionId = interaction.customId.slice(
+                    "announce_confirm:".length
+                );
+
+                const session = announceSessions.get(sessionId);
+
+                if (!session) {
+                    return interaction.update({
+                        content: "Session หมดอายุแล้ว กรุณาเริ่มใหม่ด้วย /announce",
+                        embeds: [],
+                        components: []
+                    });
+                }
+
+                broadcastLocks.announce = true;
+
+                const cancelToken = createCancelToken();
+                session.cancelToken = cancelToken;
+
+                await interaction.update({
+                    content: "กำลังส่งประกาศ... (อาจใช้เวลาสักครู่ตามจำนวนผู้รับ)",
+                    embeds: [],
+                    components: [
+                        buildCancelOnlyRow("announce", sessionId)
+                    ]
+                });
+
+                const startedAt = Date.now();
+                const embed = buildAnnounceEmbed(session.draft);
+
+                const tasks = session.audienceInfo.recipients.map(
+                    recipient => ({
+                        id: recipient.id,
+                        run: async () => {
+                            const user = await client.users.fetch(
+                                recipient.id
+                            );
+
+                            if (user.bot) {
+                                throw Object.assign(
+                                    new Error("Skip bot"),
+                                    { code: 50007 }
+                                );
+                            }
+
+                            await user.send({
+                                embeds: [embed],
+                                allowedMentions: { parse: [] }
+                            });
+                        }
+                    })
+                );
+
+                let queueResult;
+
+                try {
+                    queueResult = await runQueue(tasks, {
+                        concurrency: 2,
+                        delayMs: 700,
+                        maxRetries: 2,
+                        cancelToken
+                    });
+                } finally {
+                    broadcastLocks.announce = false;
+                    announceSessions.delete(sessionId);
+                }
+
+                const durationSeconds = (
+                    (Date.now() - startedAt) / 1000
+                ).toFixed(1);
+
+                const reportEmbed = new EmbedBuilder()
+                    .setColor(ANNOUNCE_PINK)
+                    .setTitle("📊 รายงานผลการส่งประกาศ")
+                    .addFields(
+                        {
+                            name: "✅ สำเร็จ",
+                            value: String(queueResult.success),
+                            inline: true
+                        },
+                        {
+                            name: "❌ ล้มเหลว",
+                            value: String(queueResult.failed),
+                            inline: true
+                        },
+                        {
+                            name: "⏭️ ข้าม",
+                            value: String(queueResult.skipped),
+                            inline: true
+                        },
+                        {
+                            name: "🚦 ถูกจำกัด Rate Limit (ระหว่างทาง)",
+                            value: String(queueResult.rateLimited),
+                            inline: true
+                        },
+                        {
+                            name: "⏱️ ระยะเวลาที่ใช้",
+                            value: `${durationSeconds} วินาที`,
+                            inline: true
+                        },
+                        {
+                            name: "สถานะ",
+                            value: cancelToken.cancelled
+                                ? "ถูกยกเลิกระหว่างทำงาน"
+                                : "เสร็จสิ้น",
+                            inline: true
+                        }
+                    )
+                    .setFooter({ text: "LevelingX • Owner Only" })
+                    .setTimestamp();
+
+                return interaction.editReply({
+                    content: null,
+                    embeds: [reportEmbed],
+                    components: []
+                }).catch(error => {
+                    // Interaction token อาจหมดอายุถ้าใช้เวลาส่งนานเกิน ~15 นาที
+                    // (จำนวนผู้รับเยอะมาก) — log ผลลัพธ์ไว้แทนเพื่อไม่ให้ผลลัพธ์หายไปเฉยๆ
+                    console.log(
+                        "ℹ️ Announce report (interaction token อาจหมดอายุแล้ว):",
+                        JSON.stringify({
+                            success: queueResult.success,
+                            failed: queueResult.failed,
+                            skipped: queueResult.skipped,
+                            rateLimited: queueResult.rateLimited,
+                            durationSeconds
+                        })
+                    );
+                    console.error(
+                        "Announce final report edit error:",
+                        sanitizeError(error)
+                    );
+                });
+            }
+
+            // ==================================================
+            // /update — OWNER ONLY (STEP 1: กรอก Embed)
+            // ==================================================
+
+            if (
+                interaction.isChatInputCommand() &&
+                interaction.commandName === "update"
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                if (broadcastLocks.update) {
+                    return interaction.reply({
+                        content:
+                            "มีการส่งแจ้งอัปเดตกำลังทำงานอยู่แล้ว กรุณารอให้เสร็จก่อน",
+                        ephemeral: true
+                    });
+                }
+
+                const cooldown = checkCooldown(
+                    interaction.user.id,
+                    "update",
+                    30000
+                );
+
+                if (cooldown.onCooldown) {
+                    return interaction.reply({
+                        content: `กรุณารออีก ${cooldown.remainingSeconds} วินาทีก่อนใช้คำสั่งนี้อีกครั้ง`,
+                        ephemeral: true
+                    });
+                }
+
+                const modal = new ModalBuilder()
+                    .setCustomId("update_modal")
+                    .setTitle("แจ้งอัปเดตบอท");
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("title")
+                            .setLabel("Title")
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(true)
+                            .setMaxLength(ANNOUNCE_TITLE_MAX - 2)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("description")
+                            .setLabel("Description")
+                            .setStyle(TextInputStyle.Paragraph)
+                            .setRequired(true)
+                            .setMaxLength(1000)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("updateList")
+                            .setLabel("รายการอัปเดต (บรรทัดละ 1 รายการ)")
+                            .setStyle(TextInputStyle.Paragraph)
+                            .setRequired(true)
+                            .setMaxLength(ANNOUNCE_UPDATE_LIST_MAX)
+                            .setPlaceholder(
+                                "[ + ] เพิ่มฟีเจอร์ใหม่\n[ ~ ] ปรับปรุงระบบเดิม\n[ - ] แก้ไขบั๊ก"
+                            )
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("image")
+                            .setLabel("Image URL (ไม่ใส่ก็ได้)")
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(false)
+                            .setMaxLength(500)
+                    )
+                );
+
+                return interaction.showModal(modal);
+            }
+
+            // ==================================================
+            // MODAL: update_modal (STEP 2: Preview)
+            // ==================================================
+
+            if (
+                interaction.isModalSubmit() &&
+                interaction.customId === "update_modal"
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const title = sanitizeAnnounceText(
+                    interaction.fields.getTextInputValue("title")
+                );
+
+                const description = sanitizeAnnounceText(
+                    interaction.fields.getTextInputValue("description")
+                );
+
+                const updateList = sanitizeAnnounceText(
+                    interaction.fields.getTextInputValue("updateList")
+                );
+
+                const image = interaction.fields
+                    .getTextInputValue("image")
+                    .trim();
+
+                if (!title || !description || !updateList) {
+                    return interaction.reply({
+                        content:
+                            "กรุณากรอก Title, Description และรายการอัปเดตให้ครบ",
+                        ephemeral: true
+                    });
+                }
+
+                if (!isValidHttpUrl(image)) {
+                    return interaction.reply({
+                        content:
+                            "Image URL ไม่ถูกต้อง กรุณาใส่ URL ที่ขึ้นต้นด้วย http:// หรือ https://",
+                        ephemeral: true
+                    });
+                }
+
+                await interaction.deferReply({ ephemeral: true });
+
+                const draft = { title, description, updateList, image };
+
+                let targetGuildCount = 0;
+
+                try {
+                    targetGuildCount = await guildSetups.countDocuments({
+                        panelChannelId: { $exists: true, $ne: null }
+                    });
+                } catch (error) {
+                    console.error(
+                        "Update: count target guilds error:",
+                        sanitizeError(error)
+                    );
+                }
+
+                const sessionId = makeSessionId();
+
+                updateSessions.set(sessionId, {
+                    draft,
+                    cancelToken: null,
+                    createdAt: Date.now()
+                });
+
+                return interaction.editReply({
+                    embeds: [
+                        buildUpdatePreviewEmbed(draft, targetGuildCount),
+                        buildUpdateEmbed(draft)
+                    ],
+                    components: [
+                        buildConfirmCancelEditRow("update", sessionId)
+                    ]
+                });
+            }
+
+            // ==================================================
+            // BUTTON: update_edit:<sessionId>
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("update_edit:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const sessionId = interaction.customId.slice(
+                    "update_edit:".length
+                );
+
+                const session = updateSessions.get(sessionId);
+
+                if (!session) {
+                    return interaction.update({
+                        content: "Session หมดอายุแล้ว กรุณาเริ่มใหม่ด้วย /update",
+                        embeds: [],
+                        components: []
+                    });
+                }
+
+                const modal = new ModalBuilder()
+                    .setCustomId("update_modal")
+                    .setTitle("แจ้งอัปเดตบอท");
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("title")
+                            .setLabel("Title")
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(true)
+                            .setMaxLength(ANNOUNCE_TITLE_MAX - 2)
+                            .setValue(session.draft.title)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("description")
+                            .setLabel("Description")
+                            .setStyle(TextInputStyle.Paragraph)
+                            .setRequired(true)
+                            .setMaxLength(1000)
+                            .setValue(session.draft.description)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("updateList")
+                            .setLabel("รายการอัปเดต (บรรทัดละ 1 รายการ)")
+                            .setStyle(TextInputStyle.Paragraph)
+                            .setRequired(true)
+                            .setMaxLength(ANNOUNCE_UPDATE_LIST_MAX)
+                            .setValue(session.draft.updateList)
+                    ),
+                    new ActionRowBuilder().addComponents(
+                        new TextInputBuilder()
+                            .setCustomId("image")
+                            .setLabel("Image URL (ไม่ใส่ก็ได้)")
+                            .setStyle(TextInputStyle.Short)
+                            .setRequired(false)
+                            .setMaxLength(500)
+                            .setValue(session.draft.image || "")
+                    )
+                );
+
+                updateSessions.delete(sessionId);
+
+                return interaction.showModal(modal);
+            }
+
+            // ==================================================
+            // BUTTON: update_cancel:<sessionId>
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("update_cancel:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const sessionId = interaction.customId.slice(
+                    "update_cancel:".length
+                );
+
+                updateSessions.delete(sessionId);
+
+                return interaction.update({
+                    content: "ยกเลิกการแจ้งอัปเดตแล้ว",
+                    embeds: [],
+                    components: []
+                });
+            }
+
+            // ==================================================
+            // BUTTON: update_cancel_inflight:<sessionId>
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("update_cancel_inflight:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                const sessionId = interaction.customId.slice(
+                    "update_cancel_inflight:".length
+                );
+
+                const session = updateSessions.get(sessionId);
+
+                if (session?.cancelToken) {
+                    session.cancelToken.cancelled = true;
+                }
+
+                return interaction.update({
+                    content: "กำลังยกเลิก... เซิร์ฟเวอร์ที่ยังไม่ถูกส่งจะถูกข้าม",
+                    components: []
+                });
+            }
+
+            // ==================================================
+            // BUTTON: update_confirm:<sessionId> (STEP 3: ส่งจริง)
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("update_confirm:")
+            ) {
+                if (await rejectIfNotOwner(interaction)) {
+                    return;
+                }
+
+                if (broadcastLocks.update) {
+                    return interaction.reply({
+                        content: "มีการส่งแจ้งอัปเดตกำลังทำงานอยู่แล้ว",
+                        ephemeral: true
+                    });
+                }
+
+                const sessionId = interaction.customId.slice(
+                    "update_confirm:".length
+                );
+
+                const session = updateSessions.get(sessionId);
+
+                if (!session) {
+                    return interaction.update({
+                        content: "Session หมดอายุแล้ว กรุณาเริ่มใหม่ด้วย /update",
+                        embeds: [],
+                        components: []
+                    });
+                }
+
+                broadcastLocks.update = true;
+
+                const cancelToken = createCancelToken();
+                session.cancelToken = cancelToken;
+
+                await interaction.update({
+                    content: "กำลังส่งแจ้งอัปเดตไปยังเซิร์ฟเวอร์ที่ตั้งค่าไว้...",
+                    embeds: [],
+                    components: [
+                        buildCancelOnlyRow("update", sessionId)
+                    ]
+                });
+
+                const startedAt = Date.now();
+                const embed = buildUpdateEmbed(session.draft);
+
+                let targetGuilds = [];
+
+                try {
+                    targetGuilds = await guildSetups
+                        .find({
+                            panelChannelId: { $exists: true, $ne: null }
+                        })
+                        .toArray();
+                } catch (error) {
+                    console.error(
+                        "Update: fetch target guilds error:",
+                        sanitizeError(error)
+                    );
+                }
+
+                const tasks = targetGuilds.map(setup => ({
+                    id: setup.guildId,
+                    run: async () => {
+                        const channel = await client.channels.fetch(
+                            setup.panelChannelId
+                        );
+
+                        const permissionCheck =
+                            checkBotChannelPermissions(channel);
+
+                        if (!permissionCheck.ok) {
+                            throw Object.assign(
+                                new Error(permissionCheck.reason),
+                                { code: 50001 }
+                            );
+                        }
+
+                        // ถ้าเคยส่งแจ้งอัปเดตในเซิร์ฟเวอร์นี้มาก่อน ให้ Sync (แก้ไข)
+                        // Embed เดิมแทนการส่งใหม่ซ้ำซ้อน — แยก Embed นี้ออกจาก
+                        // Embed หลักของระบบฝากบอกอย่างชัดเจน (คนละข้อความ คนละ message id)
+                        if (
+                            setup.lastUpdateChannelId ===
+                                setup.panelChannelId &&
+                            setup.lastUpdateMessageId
+                        ) {
+                            const edited = await editAnonymousChannelMessage(
+                                setup.panelChannelId,
+                                setup.lastUpdateMessageId,
+                                embed,
+                                [],
+                                1
+                            );
+
+                            if (edited) {
+                                return;
+                            }
+                            // ถ้า edit ไม่สำเร็จ (message ถูกลบไปแล้ว) ให้ตกไปส่งใหม่ด้านล่าง
+                        }
+
+                        const sentMessage = await channel.send({
+                            embeds: [embed],
+                            allowedMentions: { parse: [] }
+                        });
+
+                        await guildSetups.updateOne(
+                            { guildId: setup.guildId },
+                            {
+                                $set: {
+                                    lastUpdateChannelId: channel.id,
+                                    lastUpdateMessageId: sentMessage.id
+                                }
+                            }
+                        ).catch(() => {});
+                    }
+                }));
+
+                let queueResult;
+
+                try {
+                    queueResult = await runQueue(tasks, {
+                        concurrency: 2,
+                        delayMs: 700,
+                        maxRetries: 2,
+                        cancelToken
+                    });
+                } finally {
+                    broadcastLocks.update = false;
+                    updateSessions.delete(sessionId);
+                }
+
+                const durationSeconds = (
+                    (Date.now() - startedAt) / 1000
+                ).toFixed(1);
+
+                const reportEmbed = new EmbedBuilder()
+                    .setColor(ANNOUNCE_PINK)
+                    .setTitle("📊 รายงานผลการแจ้งอัปเดต")
+                    .addFields(
+                        {
+                            name: "✅ สำเร็จ",
+                            value: String(queueResult.success),
+                            inline: true
+                        },
+                        {
+                            name: "❌ ล้มเหลว",
+                            value: String(queueResult.failed),
+                            inline: true
+                        },
+                        {
+                            name: "⏭️ ข้าม",
+                            value: String(queueResult.skipped),
+                            inline: true
+                        },
+                        {
+                            name: "⏱️ ระยะเวลาที่ใช้",
+                            value: `${durationSeconds} วินาที`,
+                            inline: true
+                        },
+                        {
+                            name: "สถานะ",
+                            value: cancelToken.cancelled
+                                ? "ถูกยกเลิกระหว่างทำงาน"
+                                : "เสร็จสิ้น",
+                            inline: true
+                        }
+                    )
+                    .setFooter({ text: "LevelingX • Owner Only" })
+                    .setTimestamp();
+
+                return interaction.editReply({
+                    content: null,
+                    embeds: [reportEmbed],
+                    components: []
+                }).catch(error => {
+                    console.log(
+                        "ℹ️ Update report (interaction token อาจหมดอายุแล้ว):",
+                        JSON.stringify({
+                            success: queueResult.success,
+                            failed: queueResult.failed,
+                            skipped: queueResult.skipped,
+                            durationSeconds
+                        })
+                    );
+                    console.error(
+                        "Update final report edit error:",
+                        sanitizeError(error)
+                    );
+                });
+            }
+
+            // ==================================================
+            // BUTTON: welcome_setup:<guildId> (จากปุ่มใน DM ต้อนรับ)
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith("welcome_setup:")
+            ) {
+                const guildId = interaction.customId.slice(
+                    "welcome_setup:".length
+                );
+
+                await interaction.deferReply({ ephemeral: true });
+
+                const guild = client.guilds.cache.get(guildId);
+
+                if (!guild) {
+                    return interaction.editReply({
+                        content:
+                            "ไม่พบเซิร์ฟเวอร์นี้ (บอทอาจถูกเชิญออกไปแล้ว)"
+                    });
+                }
+
+                const member = await guild.members
+                    .fetch(interaction.user.id)
+                    .catch(() => null);
+
+                const isOwnerOfGuild = guild.ownerId === interaction.user.id;
+
+                const hasAdmin =
+                    member?.permissions.has(
+                        PermissionFlagsBits.Administrator
+                    ) || isOwnerOfGuild;
+
+                if (!hasAdmin) {
+                    return interaction.editReply({
+                        content:
+                            "คุณต้องเป็นเจ้าของเซิร์ฟเวอร์หรือมีสิทธิ์ Administrator ในเซิร์ฟเวอร์นั้นถึงจะตั้งค่าได้"
+                    });
+                }
+
+                const result = await runAutoGuildSetup(guild);
+
+                if (!result.ok) {
+                    return interaction.editReply({
+                        content: `ตั้งค่าไม่สำเร็จ: ${result.reason}`
+                    });
+                }
+
+                if (result.alreadySetup) {
+                    return interaction.editReply({
+                        content: `ระบบฝากบอกถูกตั้งค่าไว้แล้วที่ <#${result.channelId}>`
+                    });
+                }
+
+                return interaction.editReply({
+                    content: `ตั้งค่าระบบฝากบอกสำเร็จ! สร้างช่อง <#${result.channelId}> เรียบร้อยแล้ว`
+                });
+            }
+
+            // ==================================================
+            // BUTTON: welcome_help (จากปุ่มใน DM ต้อนรับ)
+            // ==================================================
+
+            if (
+                interaction.isButton() &&
+                interaction.customId === "welcome_help"
+            ) {
+                const helpEmbed = new EmbedBuilder()
+                    .setColor(UI_CONFIG.embed.color)
+                    .setTitle("วิธีใช้งานบอท")
+                    .setDescription(
+                        "คำสั่งที่ใช้งานได้สำหรับผู้ดูแลเซิร์ฟเวอร์:"
+                    )
+                    .addFields(
+                        {
+                            name: "/setup",
+                            value: "สร้าง หรืออัปเดตหน้าต่างฝากบอกในช่องปัจจุบัน",
+                            inline: false
+                        },
+                        {
+                            name: "/setchannel",
+                            value: "กำหนดช่องที่จะใช้รับข้อความฝากบอกที่ถูกส่งเข้ามา",
+                            inline: false
+                        }
+                    )
+                    .setFooter({ text: UI_CONFIG.embed.footer });
+
+                return interaction.reply({
+                    embeds: [helpEmbed],
+                    ephemeral: true
+                });
             }
 
             // ==================================================
