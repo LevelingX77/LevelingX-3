@@ -1,9 +1,8 @@
 {
-  "name": "77-community-bot",
+  "name": "levelingx-confession-bot",
   "version": "1.0.0",
-  "description": "Discord anonymous message bot (\u0e1d\u0e32\u0e01\u0e1a\u0e2d\u0e01) with MongoDB persistence",
+  "description": "LevelingX Discord anonymous message (ฝากบอก) bot with owner DM/update broadcast tools",
   "main": "main.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node main.js"
   },
@@ -11,10 +10,9 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "discord.js": "^14.27.0",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "mongodb": "^7.6.0"
-  },
-  "license": "ISC"
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongodb": "^6.5.0"
+  }
 }
