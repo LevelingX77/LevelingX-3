@@ -1776,7 +1776,9 @@ const ANNOUNCE_DESCRIPTION_MAX = 4096; // ขีดจำกัดจริง�
 const ANNOUNCE_MODAL_DESCRIPTION_MAX = 4000;
 const ANNOUNCE_UPDATE_LIST_MAX = 900; // ต้องพอดีกับ Field Value (1024) รวมกับบรรทัดวันที่อัตโนมัติและ code fence
 const ANNOUNCE_PINK = "#FF69B4";
-const UPDATE_FIELD_NAME = "📢 อัปเดตล่าสุด";
+// ใช้ Zero-Width Space แทนข้อความหัวข้อ Field เพราะ Discord Embed Field
+// ต้องมี name (ห้ามเป็นสตริงว่าง) — ทำให้ไม่มีข้อความ "อัปเดตล่าสุด" โชว์นอกกรอบ
+const UPDATE_FIELD_NAME = "\u200b";
 
 // ======================================================
 // 15G. COOLDOWNS
@@ -2123,47 +2125,30 @@ function buildAnnounceEmbed(draft) {
     return embed;
 }
 
-// วันที่/เวลาปัจจุบัน (Asia/Bangkok) รูปแบบไทยสำหรับแปะไว้ใน Field อัปเดตอัตโนมัติ
-function formatThaiDateTime(date = new Date()) {
-    return date.toLocaleString("th-TH", {
-        timeZone: "Asia/Bangkok",
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit"
-    });
-}
-
-// สร้างเนื้อหาของ Field "📢 อัปเดตล่าสุด" — เฉพาะรายการอัปเดต + วันที่อัปเดตอัตโนมัติ
-// เท่านั้น (ไม่มี Title/Description/Image แยก เพราะซ้ำซ้อนกับ Embed หลักของ /setup
-// อยู่แล้ว) ใช้ safeField ตัดให้ไม่เกิน 1024 ตัวอักษร (ขีดจำกัดจริงของ Embed Field Value)
+// สร้างเนื้อหาของ Field รายการอัปเดต — เฉพาะ [ + ]/[ ~ ]/[ - ] ในกรอบ code block
+// เท่านั้น ไม่มีหัวข้อ ไม่มีวันที่ (ไม่มี Title/Description/Image แยก เพราะซ้ำซ้อนกับ
+// Embed หลักของ /setup อยู่แล้ว) ใช้ safeField ตัดให้ไม่เกิน 1024 ตัวอักษร (ขีดจำกัดจริงของ Embed Field Value)
 function buildUpdateFieldValue(draft) {
-    const dateLine = `อัปเดตล่าสุด: ${formatThaiDateTime()}`;
     const listBlock = draft.updateList ? draft.updateList.trim() : "";
 
-    // เผื่อพื้นที่ให้บรรทัดวันที่แสดงเสมอ (ไม่ถูกตัดหายไปตอนใกล้ขีดจำกัด 1024
-    // ตัวอักษรของ Field Value) โดยตัดเฉพาะส่วนรายการอัปเดตถ้ายาวเกินพื้นที่ที่เหลือ
-    // — บรรทัดวันที่อยู่ในกรอบ code block เดียวกับรายการอัปเดต (ไม่แยกออกนอกกรอบ)
-    const wrapperLength = "```\n\n\n```".length;
-    const maxListLength = Math.max(
-        0,
-        1024 - wrapperLength - dateLine.length - 3
-    );
+    // กรอบ code block เปล่าๆ มีแค่รายการอัปเดต [ + ]/[ ~ ]/[ - ] เท่านั้น
+    // ไม่มีหัวข้อ ไม่มีวันที่ — ตัดให้พอดีกับขีดจำกัด 1024 ตัวอักษรของ Field Value
+    const wrapperLength = "```\n\n```".length;
+    const maxListLength = Math.max(0, 1024 - wrapperLength - 3);
 
     const truncatedList =
         listBlock.length > maxListLength
             ? listBlock.slice(0, maxListLength) + "..."
             : listBlock;
 
-    return `\`\`\`\n${truncatedList}\n${dateLine}\n\`\`\``;
+    return `\`\`\`\n${truncatedList}\n\`\`\``;
 }
 
-// merge Field "📢 อัปเดตล่าสุด" เข้ากับ Embed หลักของ /setup ที่มีอยู่เดิม (baseEmbedData
+// merge Field รายการอัปเดตเข้ากับ Embed หลักของ /setup ที่มีอยู่เดิม (baseEmbedData
 // คือ embed data จากข้อความ Panel จริง หรือ null ถ้าไม่มี ให้ fallback เป็น buildMainEmbed())
-// - แทนที่ Field เดิมชื่อเดียวกัน (ถ้ามี) ด้วยอันใหม่ทุกครั้ง (กรอบเดิม ไม่สะสม ไม่ซ้ำ)
+// - แทนที่ Field เดิม (ถ้ามี) ด้วยอันใหม่ทุกครั้ง (ลบของเก่าในกรอบออกหมดก่อนใส่ของใหม่ ไม่สะสม ไม่ซ้ำ)
 // - เก็บ Field/เนื้อหาอื่นของ Panel เดิมไว้ทั้งหมด และให้ Field นี้อยู่ล่างสุดเสมอ
-// - วันที่อัปเดตจะถูกคำนวณใหม่อัตโนมัติทุกครั้งที่เรียกฟังก์ชันนี้ (ดู buildUpdateFieldValue)
+// - ใช้ Zero-Width Space เป็นชื่อ Field จึงไม่มีข้อความหัวข้อโชว์นอกกรอบ
 function buildUpdatedPanelEmbed(baseEmbedData, draft) {
     const embed = baseEmbedData
         ? EmbedBuilder.from(baseEmbedData)
