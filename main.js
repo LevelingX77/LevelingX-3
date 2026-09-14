@@ -629,19 +629,16 @@ function scheduleDatabaseReconnect(delayMs) {
 // 8. DISCORD CLIENT
 // ======================================================
 
-// หมายเหตุสำคัญ (ฟีเจอร์ /announce, /update): เพิ่ม GatewayIntentBits.GuildMembers
-// เพราะระบบประกาศ DM ต้องคำนวณกลุ่มผู้รับ (สมาชิกทุกคน / Admin / Manage Guild /
-// เจ้าของเซิร์ฟเวอร์) จาก member cache ของแต่ละเซิร์ฟเวอร์ ซึ่งจำเป็นต้องมี Intent นี้
-// ไม่เช่นนั้น guild.members.cache จะมีแค่บอทเอง (หรือสมาชิกที่ cache ไว้จาก event อื่น)
-// *** สำคัญ: ต้องไปเปิด "SERVER MEMBERS INTENT" ที่ Discord Developer Portal ด้วย
-// (Developer Portal > Your App > Bot > Privileged Gateway Intents) ไม่งั้น client.login()
-// จะ throw error ทันที (Used disallowed intents) ***
+// หมายเหตุ: เดิมมี GatewayIntentBits.GuildMembers ไว้ให้ /announce คำนวณกลุ่มผู้รับ
+// (สมาชิกทุกคน / Admin / Manage Guild / เจ้าของเซิร์ฟเวอร์) จาก member cache ตอนนี้
+// /announce ถูกลบออกไปแล้วและไม่มีฟีเจอร์อื่นใช้ guild.members.fetch()/.cache เลย
+// จึงตัด Intent นี้ออก (ไม่กระทบ /update หรือระบบอื่น) — ถ้า Discord Developer Portal
+// ยังเปิด "SERVER MEMBERS INTENT" ค้างไว้ก็ไม่เป็นไร แค่บอทไม่ได้ขอใช้งานแล้วเท่านั้น
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.DirectMessages,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.DirectMessages
     ],
 
     partials: [
@@ -763,14 +760,9 @@ const commands = [
         .setDescription("...")
         .setDMPermission(true),
 
-    // /announce, /update: เป็นคำสั่งลับสำหรับ Bot Owner เช่นเดียวกับ owner-1/2/3
+    // /update: เป็นคำสั่งลับสำหรับ Bot Owner เช่นเดียวกับ owner-1/2/3
     // (การจำกัดสิทธิ์จริงทำที่ isBotOwner/rejectIfNotOwner ตอน execute เท่านั้น
     // ไม่พึ่งพา setDefaultMemberPermissions เพราะ Owner อาจไม่ใช่ Admin ทุกเซิร์ฟเวอร์)
-    new SlashCommandBuilder()
-        .setName("announce")
-        .setDescription("...")
-        .setDMPermission(true),
-
     new SlashCommandBuilder()
         .setName("update")
         .setDescription("...")
@@ -1728,8 +1720,8 @@ async function buildServersPage(page) {
 
 // ======================================================
 // 15F. TEXT SANITIZATION / VALIDATION HELPERS
-// ใช้ร่วมกันสำหรับ /announce และ /update (ป้องกัน Mention Spam, ความยาวเกิน,
-// URL ไม่ถูกต้อง) — ไม่แตะฟังก์ชัน safeField เดิมที่ใช้กับระบบฝากบอก
+// ใช้กับ /update (ป้องกัน Mention Spam, ความยาวเกิน)
+// ไม่แตะฟังก์ชัน safeField เดิมที่ใช้กับระบบฝากบอก
 // ======================================================
 
 // ตัดข้อความยาวเกินอย่างปลอดภัย (ไม่ตัดกลาง surrogate pair ของ emoji)
@@ -1766,15 +1758,7 @@ function isValidHttpUrl(value) {
     }
 }
 
-const ANNOUNCE_TITLE_MAX = 256;
-const ANNOUNCE_DESCRIPTION_MAX = 4096; // ขีดจำกัดจริงของ Embed Description (ใช้กับ safeTruncate/Embed เท่านั้น)
-// Discord Modal Text Input (TextInputBuilder) จำกัด max_length ไว้ที่ 4000 เท่านั้น
-// (ไม่ใช่ 4096 แบบ Embed Description) — ถ้าใช้ ANNOUNCE_DESCRIPTION_MAX (4096) กับ
-// TextInputBuilder.setMaxLength() โดยตรง discord.js จะ throw ทันทีตอนสร้าง Modal
-// (ก่อนถึง interaction.showModal() ด้วยซ้ำ) ทำให้ /announce ขึ้น "เกิดข้อผิดพลาด"
-// นี่คือสาเหตุจริงของบัค /announce ที่รายงานมา — ต้องแยกค่านี้ออกจากกันให้ชัดเจน
-const ANNOUNCE_MODAL_DESCRIPTION_MAX = 4000;
-const ANNOUNCE_UPDATE_LIST_MAX = 900; // ต้องพอดีกับ Field Value (1024) รวมกับบรรทัดวันที่อัตโนมัติและ code fence
+const ANNOUNCE_UPDATE_LIST_MAX = 900; // ต้องพอดีกับ Field Value (1024) ของ Embed
 const ANNOUNCE_PINK = "#FF69B4";
 // ใช้ Zero-Width Space แทนข้อความหัวข้อ Field เพราะ Discord Embed Field
 // ต้องมี name (ห้ามเป็นสตริงว่าง) — ทำให้ไม่มีข้อความ "อัปเดตล่าสุด" โชว์นอกกรอบ
@@ -1782,7 +1766,7 @@ const UPDATE_FIELD_NAME = "\u200b";
 
 // ======================================================
 // 15G. COOLDOWNS
-// Cooldown ต่อ User สำหรับคำสั่งที่มีผลกระทบวงกว้าง (/announce, /update)
+// Cooldown ต่อ User สำหรับคำสั่งที่มีผลกระทบวงกว้าง (/update)
 // และ Lock กันกดซ้อนระหว่างที่ Queue กำลังทำงานอยู่ (ต่อ feature ไม่ใช่ต่อ user
 // เพราะมีแค่ Bot Owner เท่านั้นที่ใช้ได้ และไม่ควรมี 2 งานพร้อมกันไม่ว่าใครจะกด)
 // ======================================================
@@ -1806,15 +1790,14 @@ function checkCooldown(userId, commandName, cooldownMs) {
     return { onCooldown: false };
 }
 
-// Lock กันกด "ยืนยัน" ซ้อนกันหลายงานพร้อมกันสำหรับ /announce และ /update แยกกัน
+// Lock กันกด "ยืนยัน" ซ้อนกันหลายงานพร้อมกันสำหรับ /update
 const broadcastLocks = {
-    announce: false,
     update: false
 };
 
 // ======================================================
-// 15H. GENERIC DM / BROADCAST QUEUE
-// ใช้ร่วมกันทั้งระบบประกาศ DM (/announce) และระบบแจ้งอัปเดต (/update)
+// 15H. GENERIC BROADCAST QUEUE
+// ใช้กับระบบแจ้งอัปเดต (/update) สำหรับแก้ไข Panel หลายเซิร์ฟเวอร์พร้อมกัน
 // - จำกัด concurrency (ค่าเริ่มต้น 2 งานพร้อมกัน)
 // - Delay ปรับได้ระหว่างงาน
 // - ตรวจจับ HTTP 429 และใช้ retry_after จาก Discord
@@ -2026,104 +2009,8 @@ async function runQueue(tasks, options = {}) {
 }
 
 // ======================================================
-// 15I. ANNOUNCE AUDIENCE HELPERS
-// คำนวณกลุ่มผู้รับตาม guild.members.cache (ต้องมี GuildMembers Intent)
-// ป้องกันสมาชิกซ้ำข้ามเซิร์ฟเวอร์ด้วย Set ของ user.id และไม่ส่งหาบอท
+// 15J. UPDATE EMBED BUILDERS
 // ======================================================
-
-const ANNOUNCE_AUDIENCES = {
-    all_members: "สมาชิกทุกคนในทุกเซิร์ฟเวอร์ที่บอทอยู่",
-    administrators: "เฉพาะสมาชิกที่มีสิทธิ์ผู้ดูแล",
-    manage_guild: "เฉพาะสมาชิกที่มีสิทธิ์จัดการเซิร์ฟเวอร์",
-    guild_owners: "เฉพาะเจ้าของเซิร์ฟเวอร์"
-};
-
-// พยายาม fetch member list ของ guild แบบปลอดภัย — ถ้าพลาด (เช่น Intent ไม่เปิด,
-// guild ใหญ่เกินไป, timeout) ให้คืน cache ที่มีอยู่แทนการทำให้ทั้งงานล้ม
-async function safeFetchGuildMembers(guild) {
-    try {
-        return await guild.members.fetch();
-    } catch (error) {
-        logDetailedError(`Announce: fetch members (guild ${guild.id})`, error);
-
-        return guild.members.cache;
-    }
-}
-
-async function collectAnnounceRecipients(audience) {
-    const recipients = new Map(); // userId -> { id, guildCount }
-    let serverCount = 0;
-
-    for (const guild of client.guilds.cache.values()) {
-        serverCount += 1;
-
-        if (audience === "guild_owners") {
-            if (!guild.ownerId) {
-                continue;
-            }
-
-            if (!recipients.has(guild.ownerId)) {
-                recipients.set(guild.ownerId, { id: guild.ownerId });
-            }
-
-            continue;
-        }
-
-        const members = await safeFetchGuildMembers(guild);
-
-        for (const member of members.values()) {
-            if (member.user.bot) {
-                continue;
-            }
-
-            if (
-                audience === "administrators" &&
-                !member.permissions.has(PermissionFlagsBits.Administrator)
-            ) {
-                continue;
-            }
-
-            if (
-                audience === "manage_guild" &&
-                !member.permissions.has(PermissionFlagsBits.ManageGuild)
-            ) {
-                continue;
-            }
-
-            if (!recipients.has(member.id)) {
-                recipients.set(member.id, { id: member.id });
-            }
-        }
-    }
-
-    return {
-        serverCount,
-        recipients: Array.from(recipients.values())
-    };
-}
-
-// ======================================================
-// 15J. ANNOUNCE / UPDATE EMBED BUILDERS
-// ======================================================
-
-function buildAnnounceEmbed(draft) {
-    const embed = new EmbedBuilder()
-        .setColor(ANNOUNCE_PINK)
-        .setTitle(safeTruncate(draft.title, ANNOUNCE_TITLE_MAX))
-        .setDescription(
-            safeTruncate(draft.description, ANNOUNCE_DESCRIPTION_MAX)
-        )
-        .setFooter({
-            text: UI_CONFIG.embed.footer || "Developer : tin.py"
-        })
-        .setTimestamp();
-
-    if (draft.image) {
-        embed.setImage(draft.image);
-    }
-
-    return embed;
-}
 
 // สร้างเนื้อหาของ Field รายการอัปเดต — เฉพาะ [ + ]/[ ~ ]/[ - ] ในกรอบ code block
 // เท่านั้น ไม่มีหัวข้อ ไม่มีวันที่ (ไม่มี Title/Description/Image แยก เพราะซ้ำซ้อนกับ
@@ -2168,46 +2055,6 @@ function buildUpdatedPanelEmbed(baseEmbedData, draft) {
     ]);
 
     return embed;
-}
-
-function buildAnnouncePreviewEmbed(draft, audienceInfo) {
-    return new EmbedBuilder()
-        .setColor(ANNOUNCE_PINK)
-        .setTitle("ตรวจสอบก่อนส่งประกาศ")
-        .addFields(
-            {
-                name: "กลุ่มผู้รับ",
-                value: ANNOUNCE_AUDIENCES[draft.audience] || "ไม่ทราบ",
-                inline: false
-            },
-            {
-                name: "จำนวนเซิร์ฟเวอร์",
-                value: String(audienceInfo.serverCount),
-                inline: true
-            },
-            {
-                name: "จำนวนผู้รับ",
-                value: String(audienceInfo.recipients.length),
-                inline: true
-            },
-            {
-                name: "Title",
-                value: safeField(draft.title),
-                inline: false
-            },
-            {
-                name: "Description",
-                value: safeField(draft.description),
-                inline: false
-            },
-            {
-                name: "⚠️ คำเตือน",
-                value:
-                    "การส่ง DM อาจล้มเหลวหากผู้รับปิดกั้น DM จากสมาชิกที่ไม่รู้จัก หรือบล็อกบอทไว้ ระบบจะข้ามผู้ใช้เหล่านั้นโดยอัตโนมัติและไม่ retry ซ้ำ",
-                inline: false
-            }
-        )
-        .setFooter({ text: "LevelingX • Owner Only" });
 }
 
 function buildUpdatePreviewEmbed(draft, targetGuildCount) {
@@ -2263,12 +2110,11 @@ function buildCancelOnlyRow(prefix, sessionId) {
 
 // ======================================================
 // 15K. DRAFT SESSION STORAGE (in-memory)
-// เก็บ Draft ของ /announce, /update ระหว่างขั้นตอน Select → Modal → Preview → Confirm
+// เก็บ Draft ของ /update ระหว่างขั้นตอน Modal → Preview → Confirm
 // เฉพาะ Bot Owner เท่านั้นที่เข้าถึงได้ (ตรวจซ้ำทุกจุด) จึง key ด้วย sessionId สุ่มพอ
 // เพื่อกันคนอื่นเดา customId มายุ่งกับ session ของ Owner ได้
 // ======================================================
 
-const announceSessions = new Map(); // sessionId -> { draft, cancelToken, createdAt }
 const updateSessions = new Map();
 
 function makeSessionId() {
@@ -2278,12 +2124,6 @@ function makeSessionId() {
 // เก็บกวาด session ที่ค้างนานเกินไป (เผื่อ Owner ปิดหน้าต่างทิ้งไว้เฉยๆ) กัน memory leak
 setInterval(() => {
     const cutoff = Date.now() - 30 * 60 * 1000; // 30 นาที
-
-    for (const [id, session] of announceSessions.entries()) {
-        if (session.createdAt < cutoff) {
-            announceSessions.delete(id);
-        }
-    }
 
     for (const [id, session] of updateSessions.entries()) {
         if (session.createdAt < cutoff) {
@@ -2698,459 +2538,6 @@ client.on(
                 console.log(
                     `▶️ /${interaction.commandName} | Command ID: ${interaction.commandId} | User: ${interaction.user.id} | Guild: ${interaction.guildId ?? "DM"}`
                 );
-            }
-
-            // ==================================================
-            // /announce — OWNER ONLY (STEP 1: เลือกกลุ่มผู้รับ)
-            // ==================================================
-
-            if (
-                interaction.isChatInputCommand() &&
-                interaction.commandName === "announce"
-            ) {
-                if (await rejectIfNotOwner(interaction)) {
-                    return;
-                }
-
-                if (broadcastLocks.announce) {
-                    return interaction.reply({
-                        content:
-                            "มีการส่งประกาศกำลังทำงานอยู่แล้ว กรุณารอให้เสร็จก่อน",
-                        ephemeral: true
-                    });
-                }
-
-                const cooldown = checkCooldown(
-                    interaction.user.id,
-                    "announce",
-                    30000
-                );
-
-                if (cooldown.onCooldown) {
-                    return interaction.reply({
-                        content: `กรุณารออีก ${cooldown.remainingSeconds} วินาทีก่อนใช้คำสั่งนี้อีกครั้ง`,
-                        ephemeral: true
-                    });
-                }
-
-                const audienceSelect = new StringSelectMenuBuilder()
-                    .setCustomId("announce_audience_select")
-                    .setPlaceholder("เลือกกลุ่มผู้รับประกาศ")
-                    .addOptions(
-                        Object.entries(ANNOUNCE_AUDIENCES).map(
-                            ([value, label]) => ({
-                                label: safeTruncate(label, 100),
-                                value
-                            })
-                        )
-                    );
-
-                return interaction.reply({
-                    content: "เลือกกลุ่มผู้รับที่ต้องการส่งประกาศ",
-                    components: [
-                        new ActionRowBuilder().addComponents(audienceSelect)
-                    ],
-                    ephemeral: true
-                });
-            }
-
-            // ==================================================
-            // SELECT: announce_audience_select (STEP 2: กรอก Embed)
-            // ==================================================
-
-            if (
-                interaction.isStringSelectMenu() &&
-                interaction.customId === "announce_audience_select"
-            ) {
-                if (await rejectIfNotOwner(interaction)) {
-                    return;
-                }
-
-                const audience = interaction.values[0];
-
-                if (!ANNOUNCE_AUDIENCES[audience]) {
-                    return interaction.update({
-                        content: "กลุ่มผู้รับไม่ถูกต้อง กรุณาลองใหม่ด้วย /announce",
-                        components: []
-                    });
-                }
-
-                const modal = new ModalBuilder()
-                    .setCustomId(`announce_modal:${audience}`)
-                    .setTitle("ระบบประกาศ DM");
-
-                modal.addComponents(
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("title")
-                            .setLabel("Title")
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(true)
-                            .setMaxLength(ANNOUNCE_TITLE_MAX)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("description")
-                            .setLabel("Description")
-                            .setStyle(TextInputStyle.Paragraph)
-                            .setRequired(true)
-                            .setMaxLength(ANNOUNCE_MODAL_DESCRIPTION_MAX)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("image")
-                            .setLabel("Image URL (ไม่ใส่ก็ได้)")
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(false)
-                            .setMaxLength(500)
-                    )
-                );
-
-                return interaction.showModal(modal);
-            }
-
-            // ==================================================
-            // MODAL: announce_modal:<audience> (STEP 3: Preview)
-            // ==================================================
-
-            if (
-                interaction.isModalSubmit() &&
-                interaction.customId.startsWith("announce_modal:")
-            ) {
-                if (await rejectIfNotOwner(interaction)) {
-                    return;
-                }
-
-                const audience = interaction.customId.slice(
-                    "announce_modal:".length
-                );
-
-                if (!ANNOUNCE_AUDIENCES[audience]) {
-                    return interaction.reply({
-                        content: "กลุ่มผู้รับไม่ถูกต้อง กรุณาลองใหม่ด้วย /announce",
-                        ephemeral: true
-                    });
-                }
-
-                const title = sanitizeAnnounceText(
-                    interaction.fields.getTextInputValue("title")
-                );
-
-                const description = sanitizeAnnounceText(
-                    interaction.fields.getTextInputValue("description")
-                );
-
-                const image = interaction.fields
-                    .getTextInputValue("image")
-                    .trim();
-
-                if (!title || !description) {
-                    return interaction.reply({
-                        content: "กรุณากรอก Title และ Description",
-                        ephemeral: true
-                    });
-                }
-
-                if (!isValidHttpUrl(image)) {
-                    return interaction.reply({
-                        content: "Image URL ไม่ถูกต้อง กรุณาใส่ URL ที่ขึ้นต้นด้วย http:// หรือ https://",
-                        ephemeral: true
-                    });
-                }
-
-                await interaction.deferReply({ ephemeral: true });
-
-                const draft = { audience, title, description, image };
-
-                const audienceInfo = await collectAnnounceRecipients(audience);
-
-                const sessionId = makeSessionId();
-
-                announceSessions.set(sessionId, {
-                    draft,
-                    audienceInfo,
-                    cancelToken: null,
-                    createdAt: Date.now()
-                });
-
-                return interaction.editReply({
-                    embeds: [
-                        buildAnnouncePreviewEmbed(draft, audienceInfo),
-                        buildAnnounceEmbed(draft)
-                    ],
-                    components: [
-                        buildConfirmCancelEditRow("announce", sessionId)
-                    ]
-                });
-            }
-
-            // ==================================================
-            // BUTTON: announce_edit:<sessionId>
-            // ==================================================
-
-            if (
-                interaction.isButton() &&
-                interaction.customId.startsWith("announce_edit:")
-            ) {
-                if (await rejectIfNotOwner(interaction)) {
-                    return;
-                }
-
-                const sessionId = interaction.customId.slice(
-                    "announce_edit:".length
-                );
-
-                const session = announceSessions.get(sessionId);
-
-                if (!session) {
-                    return interaction.update({
-                        content: "Session หมดอายุแล้ว กรุณาเริ่มใหม่ด้วย /announce",
-                        embeds: [],
-                        components: []
-                    });
-                }
-
-                const modal = new ModalBuilder()
-                    .setCustomId(`announce_modal:${session.draft.audience}`)
-                    .setTitle("ระบบประกาศ DM (แก้ไข)");
-
-                modal.addComponents(
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("title")
-                            .setLabel("Title")
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(true)
-                            .setMaxLength(ANNOUNCE_TITLE_MAX)
-                            .setValue(session.draft.title)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("description")
-                            .setLabel("Description")
-                            .setStyle(TextInputStyle.Paragraph)
-                            .setRequired(true)
-                            .setMaxLength(ANNOUNCE_MODAL_DESCRIPTION_MAX)
-                            .setValue(session.draft.description)
-                    ),
-                    new ActionRowBuilder().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId("image")
-                            .setLabel("Image URL (ไม่ใส่ก็ได้)")
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(false)
-                            .setMaxLength(500)
-                            .setValue(session.draft.image || "")
-                    )
-                );
-
-                announceSessions.delete(sessionId);
-
-                return interaction.showModal(modal);
-            }
-
-            // ==================================================
-            // BUTTON: announce_cancel:<sessionId>
-            // ==================================================
-
-            if (
-                interaction.isButton() &&
-                interaction.customId.startsWith("announce_cancel:")
-            ) {
-                if (await rejectIfNotOwner(interaction)) {
-                    return;
-                }
-
-                const sessionId = interaction.customId.slice(
-                    "announce_cancel:".length
-                );
-
-                announceSessions.delete(sessionId);
-
-                return interaction.update({
-                    content: "ยกเลิกการประกาศแล้ว",
-                    embeds: [],
-                    components: []
-                });
-            }
-
-            // ==================================================
-            // BUTTON: announce_cancel_inflight:<sessionId> (ยกเลิกระหว่างส่ง)
-            // ==================================================
-
-            if (
-                interaction.isButton() &&
-                interaction.customId.startsWith("announce_cancel_inflight:")
-            ) {
-                if (await rejectIfNotOwner(interaction)) {
-                    return;
-                }
-
-                const sessionId = interaction.customId.slice(
-                    "announce_cancel_inflight:".length
-                );
-
-                const session = announceSessions.get(sessionId);
-
-                if (session?.cancelToken) {
-                    session.cancelToken.cancelled = true;
-                }
-
-                return interaction.update({
-                    content: "กำลังยกเลิก... งานที่ค้างอยู่ในคิวจะถูกข้าม",
-                    components: []
-                });
-            }
-
-            // ==================================================
-            // BUTTON: announce_confirm:<sessionId> (STEP 4: ส่งจริง)
-            // ==================================================
-
-            if (
-                interaction.isButton() &&
-                interaction.customId.startsWith("announce_confirm:")
-            ) {
-                if (await rejectIfNotOwner(interaction)) {
-                    return;
-                }
-
-                if (broadcastLocks.announce) {
-                    return interaction.reply({
-                        content: "มีการส่งประกาศกำลังทำงานอยู่แล้ว",
-                        ephemeral: true
-                    });
-                }
-
-                const sessionId = interaction.customId.slice(
-                    "announce_confirm:".length
-                );
-
-                const session = announceSessions.get(sessionId);
-
-                if (!session) {
-                    return interaction.update({
-                        content: "Session หมดอายุแล้ว กรุณาเริ่มใหม่ด้วย /announce",
-                        embeds: [],
-                        components: []
-                    });
-                }
-
-                broadcastLocks.announce = true;
-
-                const cancelToken = createCancelToken();
-                session.cancelToken = cancelToken;
-
-                await interaction.update({
-                    content: "กำลังส่งประกาศ... (อาจใช้เวลาสักครู่ตามจำนวนผู้รับ)",
-                    embeds: [],
-                    components: [
-                        buildCancelOnlyRow("announce", sessionId)
-                    ]
-                });
-
-                const startedAt = Date.now();
-                const embed = buildAnnounceEmbed(session.draft);
-
-                const tasks = session.audienceInfo.recipients.map(
-                    recipient => ({
-                        id: recipient.id,
-                        run: async () => {
-                            const user = await client.users.fetch(
-                                recipient.id
-                            );
-
-                            if (user.bot) {
-                                throw Object.assign(
-                                    new Error("Skip bot"),
-                                    { code: 50007 }
-                                );
-                            }
-
-                            await user.send({
-                                embeds: [embed],
-                                allowedMentions: { parse: [] }
-                            });
-                        }
-                    })
-                );
-
-                let queueResult;
-
-                try {
-                    queueResult = await runQueue(tasks, {
-                        concurrency: 2,
-                        delayMs: 700,
-                        maxRetries: 2,
-                        cancelToken
-                    });
-                } finally {
-                    broadcastLocks.announce = false;
-                    announceSessions.delete(sessionId);
-                }
-
-                const durationSeconds = (
-                    (Date.now() - startedAt) / 1000
-                ).toFixed(1);
-
-                const reportEmbed = new EmbedBuilder()
-                    .setColor(ANNOUNCE_PINK)
-                    .setTitle("📊 รายงานผลการส่งประกาศ")
-                    .addFields(
-                        {
-                            name: "✅ สำเร็จ",
-                            value: String(queueResult.success),
-                            inline: true
-                        },
-                        {
-                            name: "❌ ล้มเหลว",
-                            value: String(queueResult.failed),
-                            inline: true
-                        },
-                        {
-                            name: "⏭️ ข้าม",
-                            value: String(queueResult.skipped),
-                            inline: true
-                        },
-                        {
-                            name: "🚦 ถูกจำกัด Rate Limit (ระหว่างทาง)",
-                            value: String(queueResult.rateLimited),
-                            inline: true
-                        },
-                        {
-                            name: "⏱️ ระยะเวลาที่ใช้",
-                            value: `${durationSeconds} วินาที`,
-                            inline: true
-                        },
-                        {
-                            name: "สถานะ",
-                            value: cancelToken.cancelled
-                                ? "ถูกยกเลิกระหว่างทำงาน"
-                                : "เสร็จสิ้น",
-                            inline: true
-                        }
-                    )
-                    .setFooter({ text: "LevelingX • Owner Only" })
-                    .setTimestamp();
-
-                return interaction.editReply({
-                    content: null,
-                    embeds: [reportEmbed],
-                    components: []
-                }).catch(error => {
-                    // Interaction token อาจหมดอายุถ้าใช้เวลาส่งนานเกิน ~15 นาที
-                    // (จำนวนผู้รับเยอะมาก) — log ผลลัพธ์ไว้แทนเพื่อไม่ให้ผลลัพธ์หายไปเฉยๆ
-                    console.log(
-                        "ℹ️ Announce report (interaction token อาจหมดอายุแล้ว):",
-                        JSON.stringify({
-                            success: queueResult.success,
-                            failed: queueResult.failed,
-                            skipped: queueResult.skipped,
-                            rateLimited: queueResult.rateLimited,
-                            durationSeconds
-                        })
-                    );
-                    logDetailedError("Announce: final report edit", error);
-                });
             }
 
             // ==================================================
