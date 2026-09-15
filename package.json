@@ -1,7 +1,7 @@
 {
-  "name": "levelingx-confession-bot",
+  "name": "yume-bot",
   "version": "1.0.0",
-  "description": "LevelingX Discord anonymous message (ฝากบอก) bot with owner DM/update broadcast tools",
+  "description": "yume Discord anonymous message (ฝากบอก) bot with owner DM/update broadcast tools",
   "main": "main.js",
   "scripts": {
     "start": "node main.js"
