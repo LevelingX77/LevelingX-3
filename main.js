@@ -29,9 +29,6 @@ const {
     ObjectId
 } = require("mongodb");
 
-// ======================================================
-// 1. UI CONFIG
-// ======================================================
 
 const UI_CONFIG = {
     embed: {
@@ -52,9 +49,6 @@ const UI_CONFIG = {
     }
 };
 
-// ======================================================
-// 2. VALIDATE UI CONFIG
-// ======================================================
 
 function validateUIConfig() {
     console.log("🔄 Validating UI_CONFIG...");
@@ -133,9 +127,6 @@ function validateUIConfig() {
 
 validateUIConfig();
 
-// ======================================================
-// 3. ENVIRONMENT VARIABLES
-// ======================================================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -151,10 +142,6 @@ if (!TOKEN || !CLIENT_ID || !MONGODB_URI) {
     process.exit(1);
 }
 
-// Discord snowflake ID = ตัวเลขล้วน 17-20 หลัก
-// CLIENT_ID ต้องเป็น "Application ID" จาก Discord Developer Portal
-// (Developer Portal > Your App > General Information > Application ID)
-// ไม่ใช่ Bot Token และไม่ใช่ Public Key — ถ้าใส่ผิดตัว Slash Command จะไม่ขึ้นแม้ register สำเร็จ
 const SNOWFLAKE_REGEX = /^\d{17,20}$/;
 
 if (!SNOWFLAKE_REGEX.test(CLIENT_ID)) {
@@ -167,9 +154,6 @@ if (!SNOWFLAKE_REGEX.test(CLIENT_ID)) {
     process.exit(1);
 }
 
-// BOT_OWNER_ID ไม่ใช่ required env var แบบ hard requirement เพื่อไม่ให้บอทที่ใช้งานอยู่แล้ว
-// crash โดยไม่จำเป็นถ้ายังไม่ได้ตั้งค่า แต่คำสั่ง Owner-only (/stats, /servers, /botstats)
-// จะถูกปฏิเสธเสมอถ้าไม่มีค่านี้ (ดูฟังก์ชัน isBotOwner ด้านล่าง)
 if (!BOT_OWNER_ID) {
     console.error(
         "⚠️ BOT_OWNER_ID ไม่ได้ถูกตั้งค่าใน Environment Variables"
@@ -186,9 +170,6 @@ if (!BOT_OWNER_ID) {
     );
 }
 
-// ฟังก์ชันตรวจสอบว่า user เป็น Bot Owner หรือไม่
-// ใช้ interaction.user.id === process.env.BOT_OWNER_ID เท่านั้น
-// ห้ามใช้ username / displayName / nickname / Administrator / Manage Server / role ใดๆ
 function isBotOwner(userId) {
     if (!BOT_OWNER_ID) {
         return false;
@@ -227,8 +208,6 @@ async function rejectIfNotOwner(interaction) {
     return true;
 }
 
-// sanitizeError ยังไม่ถูก define ตอนนี้ (มันอยู่หัวข้อ 6 ด้านล่าง)
-// ใช้ตัวช่วยเบื้องต้นสำหรับจุดนี้เพื่อไม่ต้องย้ายโค้ดทั้งหมด
 function sanitizeErrorEarly(error) {
     if (!error) {
         return "Unknown Error";
@@ -247,14 +226,11 @@ if (
     process.exit(1);
 }
 
-// ======================================================
-// 4. EXPRESS SERVER
-// ======================================================
 
 const app = express();
 
 app.get("/", (req, res) => {
-    res.status(200).send("77 Community Bot is online.");
+    res.status(200).send("yume Bot is online.");
 });
 
 app.get("/health", (req, res) => {
@@ -291,9 +267,6 @@ const httpServer = app.listen(PORT, "0.0.0.0", () => {
     );
 });
 
-// ======================================================
-// 5. MONGODB
-// ======================================================
 
 const mongo = new MongoClient(MONGODB_URI, {
     serverApi: {
@@ -316,16 +289,8 @@ let anonymousMessages;
 let botGuildsCollection;
 let botStatsCollection;
 
-// สถานะการเชื่อมต่อ MongoDB "จริง" — ไม่ใช่แค่ตัวแปร db มีค่าอยู่หรือไม่
-// mongoConnected จะถูกอัปเดตจาก event ของ MongoClient เท่านั้น (serverHeartbeatSucceeded /
-// close / error / topologyClosed) เพื่อสะท้อนสถานะ connection ที่แท้จริง
-// แก้ปัญหาเดิมที่ใช้ "if (db) return;" ซึ่งทำให้ reconnect ไม่ทำงานเพราะ db ยังมีค่าอยู่
-// แม้ connection จริงจะตายไปแล้ว
 let mongoConnected = false;
 
-// ใช้ประสาน timing ระหว่าง MongoDB connect กับ Discord ready — เพราะสองอย่างนี้
-// เชื่อมต่อแบบ async แยกกัน ไม่รู้ว่าอันไหนจะพร้อมก่อน ฟังก์ชัน syncAllSetupPanels()
-// ต้องรอทั้งคู่พร้อมก่อนถึงจะรันได้ (ต้องมีทั้ง guildSetups collection และ client login แล้ว)
 let setupPanelsSyncedOnce = false;
 
 function isMongoConnected() {
@@ -361,9 +326,6 @@ mongo.on("topologyClosed", () => {
     scheduleDatabaseReconnect();
 });
 
-// ======================================================
-// 6. ERROR SANITIZER
-// ======================================================
 
 function scrubMongoCredentials(text) {
     return String(text ?? "").replace(
@@ -372,7 +334,6 @@ function scrubMongoCredentials(text) {
     );
 }
 
-// sanitizeError: คืนข้อความ Error แบบสั้น (ไม่มี Mongo credentials) ใช้แสดงผลทั่วไป
 function sanitizeError(error) {
     if (!error) {
         return "Unknown Error";
@@ -381,9 +342,6 @@ function sanitizeError(error) {
     return scrubMongoCredentials(error.message || String(error));
 }
 
-// logDetailedError: ใช้ตอน Log ลง Render สำหรับจุดที่ต้องการรายละเอียดครบ
-// (ชื่อคำสั่ง/ขั้นตอน, message, code, HTTP status, รายละเอียดจาก Discord API,
-// stack trace) ตามข้อกำหนด — ไม่ใช้ค่าที่ฟังก์ชันนี้คืนไปแสดงให้ผู้ใช้เห็นเด็ดขาด
 function logDetailedError(context, error) {
     if (!error) {
         console.error(`❌ [${context}] Unknown Error (no error object)`);
@@ -418,13 +376,6 @@ function logDetailedError(context, error) {
     }
 }
 
-// ======================================================
-// 7. CONNECT DATABASE
-// ======================================================
-
-// ป้องกันไม่ให้มีการเรียก connectDatabase() พร้อมกันหลายชุด
-// (เช่น background reconnect ชนกับ manual retry) ซึ่งจะทำให้เกิด
-// reconnect loop ซ้อนกันหลายตัวได้
 let connectDatabaseInFlight = false;
 
 async function connectDatabase(
@@ -516,10 +467,6 @@ async function connectDatabase(
 
                 mongoConnected = true;
 
-                // เผื่อ Discord Client login เสร็จ (ClientReady ยิงไปแล้ว) ก่อนที่
-                // MongoDB จะเชื่อมต่อสำเร็จ — ต้องมาเรียก sync ตรงนี้อีกที เพราะ
-                // ตอน ClientReady เรียก trySyncSetupPanelsOnce() ไปแล้ว guildSetups
-                // อาจยังไม่มีค่า (ฟังก์ชันเองมี setupPanelsSyncedOnce กันไม่ให้ทำซ้ำ)
                 trySyncSetupPanelsOnce();
 
                 return true;
@@ -532,10 +479,6 @@ async function connectDatabase(
                 );
 
                 if (attempt === maxRetries) {
-                    // สำคัญ: ห้ามให้ MongoDB ล่มพา Discord Bot ล่มไปด้วย
-                    // Bot ยัง login และ register slash commands ได้ตามปกติ
-                    // ฟีเจอร์ที่ต้องใช้ฐานข้อมูล (บันทึก setup, เก็บข้อความฝากบอก ฯลฯ)
-                    // จะแจ้งผู้ใช้ว่าใช้งานไม่ได้ชั่วคราวแทนที่จะทำให้ทั้งบอทปิดตัว
                     console.error(
                         "❌ ไม่สามารถเชื่อมต่อ MongoDB ได้หลังจากลองครบทุกครั้งแล้ว"
                     );
@@ -567,10 +510,6 @@ async function connectDatabase(
     }
 }
 
-// ======================================================
-// 7B. BACKGROUND MONGODB RECONNECT
-// พยายามเชื่อมต่อ MongoDB ใหม่เรื่อยๆ แบบไม่บล็อก Discord Bot
-// ======================================================
 
 let reconnectScheduled = false;
 let reconnectAttemptCount = 0;
@@ -581,14 +520,11 @@ function scheduleDatabaseReconnect(delayMs) {
     }
 
     if (isMongoConnected()) {
-        // connection จริงยังใช้งานได้ ไม่ต้อง schedule reconnect
         return;
     }
 
     reconnectScheduled = true;
 
-    // Exponential backoff: 1x, 2x, 4x, 8x... สูงสุด 5 นาที
-    // เพื่อไม่ให้ยิง request ไปที่ MongoDB Atlas ถี่เกินไปตอนมันล่มยาว
     const baseDelay = delayMs || 15000;
     const backoffDelay = Math.min(
         baseDelay * Math.pow(2, reconnectAttemptCount),
@@ -602,8 +538,6 @@ function scheduleDatabaseReconnect(delayMs) {
     setTimeout(async () => {
         reconnectScheduled = false;
 
-        // ตรวจสอบ connection จริงแทนการเช็คแค่ว่าตัวแปร db มีค่าอยู่หรือไม่
-        // เพราะ db อาจยังชี้ไป object เดิมแม้ connection จริงจะตายไปแล้ว
         if (isMongoConnected()) {
             reconnectAttemptCount = 0;
             return;
@@ -625,15 +559,7 @@ function scheduleDatabaseReconnect(delayMs) {
     }, backoffDelay);
 }
 
-// ======================================================
-// 8. DISCORD CLIENT
-// ======================================================
 
-// หมายเหตุ: เดิมมี GatewayIntentBits.GuildMembers ไว้ให้ /announce คำนวณกลุ่มผู้รับ
-// (สมาชิกทุกคน / Admin / Manage Guild / เจ้าของเซิร์ฟเวอร์) จาก member cache ตอนนี้
-// /announce ถูกลบออกไปแล้วและไม่มีฟีเจอร์อื่นใช้ guild.members.fetch()/.cache เลย
-// จึงตัด Intent นี้ออก (ไม่กระทบ /update หรือระบบอื่น) — ถ้า Discord Developer Portal
-// ยังเปิด "SERVER MEMBERS INTENT" ค้างไว้ก็ไม่เป็นไร แค่บอทไม่ได้ขอใช้งานแล้วเท่านั้น
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -646,13 +572,7 @@ const client = new Client({
     ]
 });
 
-// ======================================================
-// 8B. DISCORD CLIENT RESILIENCE
-// ป้องกันไม่ให้ Bot crash จาก error ธรรมดาของ Discord Gateway/API
-// (disconnect ชั่วคราว, rate limit, shard error ฯลฯ)
-// discord.js เองมี auto-reconnect ของ Gateway อยู่แล้ว หน้าที่ของ handler พวกนี้
-// คือแค่ log ให้เห็นสถานะ ไม่ใช่ไปเขียน logic reconnect ซ้ำเอง
-// ======================================================
+
 
 client.on(Events.Error, error => {
     console.error(
@@ -692,9 +612,6 @@ client.rest.on("rateLimited", info => {
     );
 });
 
-// ======================================================
-// 9. SLASH COMMANDS
-// ======================================================
 
 const commands = [
     new SlashCommandBuilder()
@@ -726,25 +643,11 @@ const commands = [
         )
         .setDMPermission(false),
 
-    // /help เปิดให้ทุกคนใช้ได้ตามปกติ (ไม่มี setDefaultMemberPermissions)
-    // อธิบายเฉพาะ /setup และ /setchannel เท่านั้น — ห้ามพูดถึง /owner-1, /owner-2,
-    // /owner-3 เพราะเป็นคำสั่งลับสำหรับ Bot Owner เท่านั้น การใส่ไว้ใน /help
-    // จะทำให้ผู้ใช้ทั่วไปรู้ว่ามีคำสั่งลับเหล่านี้อยู่
     new SlashCommandBuilder()
         .setName("help")
         .setDescription("วิธีการใช้บอท")
         .setDMPermission(true),
 
-    // หมายเหตุ: /owner-1, /owner-2, /owner-3 ไม่ได้ตั้ง setDefaultMemberPermissions
-    // เป็น Administrator เพราะ Owner ของบอทอาจไม่ใช่ Admin ในทุกเซิร์ฟเวอร์ที่บอทอยู่
-    // การจำกัดสิทธิ์ทำที่ระดับ interaction.user.id === process.env.BOT_OWNER_ID
-    // ตอน execute เท่านั้น (ดู isBotOwner) — ห้ามพึ่งพา Discord permission system
-    // สำหรับคำสั่งกลุ่มนี้ เพราะ Owner ต้องใช้ได้ไม่ว่าจะอยู่ role ไหนก็ตาม
-    // Mapping: owner-1 = stats ภาพรวม, owner-2 = server list (มี pagination),
-    // owner-3 = botstats เชิงลึก — ชื่อ command กับ if-block ในตัว interaction
-    // handler ต้องตรงกันเป๊ะเสมอ ไม่งั้นคำสั่งจะไม่ตอบสนองเลย (Discord จะขึ้นว่า
-    // "The application did not respond" เพราะไม่มี branch ไหน match แล้วไม่มีการ
-    // reply/defer ภายใน 3 วินาที)
     new SlashCommandBuilder()
         .setName("owner-1")
         .setDescription("...")
@@ -760,18 +663,12 @@ const commands = [
         .setDescription("...")
         .setDMPermission(true),
 
-    // /update: เป็นคำสั่งลับสำหรับ Bot Owner เช่นเดียวกับ owner-1/2/3
-    // (การจำกัดสิทธิ์จริงทำที่ isBotOwner/rejectIfNotOwner ตอน execute เท่านั้น
-    // ไม่พึ่งพา setDefaultMemberPermissions เพราะ Owner อาจไม่ใช่ Admin ทุกเซิร์ฟเวอร์)
     new SlashCommandBuilder()
         .setName("update")
         .setDescription("...")
         .setDMPermission(true)
 ].map(command => command.toJSON());
 
-// ======================================================
-// 10. REGISTER SLASH COMMANDS
-// ======================================================
 
 async function registerCommands() {
     const commandNames = commands
@@ -816,8 +713,6 @@ async function registerCommands() {
             sanitizeError(error)
         );
 
-        // ดึงรายละเอียด error จาก Discord REST API ให้ชัดเจนขึ้น
-        // (error.status / error.code / error.rawError มักบอกสาเหตุตรงๆ)
         if (error.status) {
             console.error(
                 `   HTTP Status: ${error.status}`
@@ -855,16 +750,9 @@ async function registerCommands() {
             );
         }
 
-        // ไม่ throw error ต่อ เพื่อไม่ให้ Discord Bot ทั้งตัวล่มเพียงเพราะ
-        // register commands ล้มเหลวชั่วคราว (เช่น Discord API ดีเลย์/rate limit)
-        // Bot ยัง login และตอบ interaction เดิม ๆ ได้ตามปกติ
     }
 }
 
-// ======================================================
-// 11. SAFE FIELD
-// Discord Embed field value max = 1024
-// ======================================================
 
 function safeField(
     value,
@@ -881,9 +769,6 @@ function safeField(
     return text.slice(0, 1021) + "...";
 }
 
-// ======================================================
-// 12. EMBED BUILDERS
-// ======================================================
 
 function buildMainEmbed() {
     const embed = new EmbedBuilder()
@@ -1061,9 +946,6 @@ function buildReplyNotificationEmbed(
         });
 }
 
-// ======================================================
-// 13. GET GUILD SETUP
-// ======================================================
 
 async function getGuildSetup(
     guildId
@@ -1090,9 +972,6 @@ async function getGuildSetup(
     }
 }
 
-// ======================================================
-// 14. CHECK BOT PERMISSIONS
-// ======================================================
 
 function checkBotChannelPermissions(
     channel
@@ -1181,9 +1060,6 @@ function checkBotChannelPermissions(
     };
 }
 
-// ======================================================
-// 15. EDIT PUBLIC MESSAGE
-// ======================================================
 
 async function editAnonymousChannelMessage(
     channelId,
@@ -1243,10 +1119,6 @@ async function editAnonymousChannelMessage(
     return false;
 }
 
-// ======================================================
-// 15B. GLOBAL STATS (in-memory counter + periodic flush)
-// ไม่เขียน MongoDB ทุก Interaction — นับใน memory แล้ว flush เป็นระยะแทน
-// ======================================================
 
 let commandsUsedCounter = 0;
 let statsFlushInterval = null;
@@ -1283,7 +1155,6 @@ async function flushGlobalStats() {
             { upsert: true }
         );
     } catch (error) {
-        // ถ้า flush ไม่สำเร็จ ให้บวกตัวนับกลับคืน เพื่อไม่ให้ข้อมูลหาย
         commandsUsedCounter += incrementBy;
 
         console.error(
@@ -1324,12 +1195,6 @@ function startStatsFlushInterval() {
     }, 5 * 60 * 1000);
 }
 
-// ======================================================
-// 15C. GUILD STATS PERSISTENCE (bot_guilds collection)
-// อัปเดตตอน Ready / guildCreate / guildDelete เท่านั้น ไม่เขียนทุกวินาที
-// ======================================================
-
-// Cache invite URL ต่อ guild ในหน่วยความจำ กัน createInvite ซ้ำทุกครั้งที่เรียก /servers
 const inviteUrlCache = new Map();
 
 async function getOrCreateGuildInvite(guild) {
@@ -1456,27 +1321,17 @@ async function syncAllGuildStats() {
         return;
     }
 
-    // ทำทีละ guild แบบ sequential เพื่อไม่ยิง MongoDB write/Discord API พร้อมกันจำนวนมาก
-    // (สำคัญบน Render Free ที่ CPU/Network จำกัด)
     for (const guild of client.guilds.cache.values()) {
         await upsertGuildStats(guild);
     }
 }
 
-// ======================================================
-// 15C-2. AUTO-SYNC SETUP PANEL EMBEDS
-// เมื่อแก้ไข UI_CONFIG ในโค้ด (เช่น เปลี่ยนรูปภาพ/ข้อความ embed) แล้ว deploy ใหม่
-// ฟังก์ชันนี้จะไล่อัปเดต embed ของหน้าต่างฝากบอกในทุกเซิร์ฟเวอร์ที่เคยตั้งค่า
-// /setup ไว้แล้วโดยอัตโนมัติตอนบอทเริ่มทำงาน แอดมินแต่ละเซิร์ฟเวอร์ไม่ต้องกด
-// /setup ซ้ำเองทุกครั้งที่มีการแก้ embed
-// ======================================================
 
 async function syncAllSetupPanels() {
     if (!guildSetups) {
         return;
     }
 
-    // Build embed/button ครั้งเดียวจาก UI_CONFIG ล่าสุด แล้วใช้ซ้ำกับทุกเซิร์ฟเวอร์
     const embed = buildMainEmbed();
     const button = buildMainButton();
 
@@ -1501,8 +1356,6 @@ async function syncAllSetupPanels() {
 
     try {
         for await (const setup of cursor) {
-            // ใช้ retries: 1 เพื่อไม่ยิง API ซ้ำหนักเกินไปตอน sync ทีเดียวหลายเซิร์ฟเวอร์
-            // ถ้าพลาดรอบนี้ จะลองใหม่อัตโนมัติตอน deploy ครั้งถัดไป
             const success = await editAnonymousChannelMessage(
                 setup.panelChannelId,
                 setup.panelMessageId,
@@ -1517,8 +1370,6 @@ async function syncAllSetupPanels() {
                 failed += 1;
             }
 
-            // หน่วงเล็กน้อยระหว่างแต่ละเซิร์ฟเวอร์ กัน Discord rate limit
-            // เมื่อมีหลายเซิร์ฟเวอร์ที่ตั้งค่าไว้พร้อมกัน
             await new Promise(resolve =>
                 setTimeout(resolve, 300)
             );
@@ -1537,11 +1388,6 @@ async function syncAllSetupPanels() {
     }
 }
 
-// เรียก syncAllSetupPanels() ครั้งเดียวหลังจากทั้ง MongoDB (guildSetups collection)
-// และ Discord Client (login แล้ว) พร้อมทั้งคู่ — เพราะสองอย่างนี้เชื่อมต่อแบบ async
-// แยกกันคนละจังหวะ ไม่รู้ล่วงหน้าว่าอันไหนจะพร้อมก่อน จึงต้องเรียกฟังก์ชันนี้ทั้งจาก
-// ClientReady และจากตอน MongoDB connect สำเร็จ (ดู connectDatabase) เพื่อให้ไม่ว่า
-// อันไหนพร้อมทีหลัง sync ก็จะยังทำงานจนได้ และ setupPanelsSyncedOnce กันไม่ให้รันซ้ำ
 function trySyncSetupPanelsOnce() {
     if (setupPanelsSyncedOnce) {
         return;
@@ -1565,11 +1411,6 @@ function trySyncSetupPanelsOnce() {
     });
 }
 
-// ======================================================
-// 15D. BOT PRESENCE ROTATION
-// สลับข้อความ "Watching X Servers" / "Watching X Members" ทุก ~15 วินาที
-// โดยใช้ client.guilds.cache เท่านั้น ไม่ fetch สมาชิกเพิ่ม
-// ======================================================
 
 function getTotalMemberCount() {
     return client.guilds.cache.reduce(
@@ -1593,7 +1434,7 @@ function updatePresenceOnce() {
         presenceShowingMembers = !presenceShowingMembers;
 
         client.user?.setActivity(text, {
-            type: 3 // Watching
+            type: 3
         });
     } catch (error) {
         console.error(
@@ -1604,8 +1445,6 @@ function updatePresenceOnce() {
 }
 
 function startPresenceRotation() {
-    // สำคัญ: ต้อง clear interval เดิมก่อนเสมอ ป้องกันไม่ให้เกิด interval
-    // ซ้อนกันหลายตัวจากการเรียกจากหลาย event (ready / guildCreate / guildDelete)
     if (presenceInterval) {
         clearInterval(presenceInterval);
         presenceInterval = null;
@@ -1619,9 +1458,6 @@ function startPresenceRotation() {
     );
 }
 
-// ======================================================
-// 15E. STATS / SERVERS HELPERS
-// ======================================================
 
 function formatUptime(totalSeconds) {
     const days = Math.floor(totalSeconds / 86400);
@@ -1673,7 +1509,6 @@ async function buildServersPage(page) {
     }
 
     for (const guild of pageGuilds) {
-        // ใช้ invite ที่ cache ไว้แทนการสร้างใหม่ทุกครั้งที่เรียก /servers
         let inviteUrl = inviteUrlCache.get(guild.id);
 
         if (inviteUrl === undefined) {
@@ -1718,13 +1553,6 @@ async function buildServersPage(page) {
     return { embed, components };
 }
 
-// ======================================================
-// 15F. TEXT SANITIZATION / VALIDATION HELPERS
-// ใช้กับ /update (ป้องกัน Mention Spam, ความยาวเกิน)
-// ไม่แตะฟังก์ชัน safeField เดิมที่ใช้กับระบบฝากบอก
-// ======================================================
-
-// ตัดข้อความยาวเกินอย่างปลอดภัย (ไม่ตัดกลาง surrogate pair ของ emoji)
 function safeTruncate(text, maxLength) {
     const str = String(text ?? "");
 
@@ -1735,8 +1563,6 @@ function safeTruncate(text, maxLength) {
     return Array.from(str).slice(0, Math.max(0, maxLength - 3)).join("") + "...";
 }
 
-// ป้องกัน @everyone / @here / mass mention ที่ผู้ใช้พิมพ์เข้ามาใน Title/Description/รายการอัปเดต
-// (การส่งจริงทุกจุดใน 2 ฟีเจอร์นี้ใช้ allowedMentions: { parse: [] } อยู่แล้วเป็นชั้นป้องกันที่ 2)
 function sanitizeAnnounceText(text) {
     return String(text ?? "")
         .replace(/@everyone/gi, "@\u200beveryone")
@@ -1746,7 +1572,7 @@ function sanitizeAnnounceText(text) {
 
 function isValidHttpUrl(value) {
     if (!value) {
-        return true; // field เป็น optional ปล่อยว่างได้
+        return true;
     }
 
     try {
@@ -1758,20 +1584,12 @@ function isValidHttpUrl(value) {
     }
 }
 
-const ANNOUNCE_UPDATE_LIST_MAX = 900; // ต้องพอดีกับ Field Value (1024) ของ Embed
+const ANNOUNCE_UPDATE_LIST_MAX = 900;
 const ANNOUNCE_PINK = "#FF69B4";
-// ใช้ Zero-Width Space แทนข้อความหัวข้อ Field เพราะ Discord Embed Field
-// ต้องมี name (ห้ามเป็นสตริงว่าง) — ทำให้ไม่มีข้อความ "อัปเดตล่าสุด" โชว์นอกกรอบ
 const UPDATE_FIELD_NAME = "\u200b";
 
-// ======================================================
-// 15G. COOLDOWNS
-// Cooldown ต่อ User สำหรับคำสั่งที่มีผลกระทบวงกว้าง (/update)
-// และ Lock กันกดซ้อนระหว่างที่ Queue กำลังทำงานอยู่ (ต่อ feature ไม่ใช่ต่อ user
-// เพราะมีแค่ Bot Owner เท่านั้นที่ใช้ได้ และไม่ควรมี 2 งานพร้อมกันไม่ว่าใครจะกด)
-// ======================================================
 
-const commandCooldowns = new Map(); // key: `${userId}:${commandName}` -> timestamp ที่ใช้ได้อีกครั้ง
+const commandCooldowns = new Map();
 
 function checkCooldown(userId, commandName, cooldownMs) {
     const key = `${userId}:${commandName}`;
@@ -1790,34 +1608,21 @@ function checkCooldown(userId, commandName, cooldownMs) {
     return { onCooldown: false };
 }
 
-// Lock กันกด "ยืนยัน" ซ้อนกันหลายงานพร้อมกันสำหรับ /update
 const broadcastLocks = {
     update: false
 };
 
-// ======================================================
-// 15H. GENERIC BROADCAST QUEUE
-// ใช้กับระบบแจ้งอัปเดต (/update) สำหรับแก้ไข Panel หลายเซิร์ฟเวอร์พร้อมกัน
-// - จำกัด concurrency (ค่าเริ่มต้น 2 งานพร้อมกัน)
-// - Delay ปรับได้ระหว่างงาน
-// - ตรวจจับ HTTP 429 และใช้ retry_after จาก Discord
-// - Exponential backoff สำหรับข้อผิดพลาดชั่วคราว
-// - จำกัด retry ต่อ task (ค่าเริ่มต้น 2 ครั้ง)
-// - Pause อัตโนมัติเมื่อโดน rate limit ต่อเนื่องหลายครั้งติดกัน
-// - รองรับยกเลิกระหว่างทำงานผ่าน cancelToken
-// - ไม่ retry error ถาวร (Missing Permissions / Unknown User / Unknown Channel / บล็อก DM)
-// ======================================================
 
 const PERMANENT_DISCORD_ERROR_CODES = new Set([
-    10001, // Unknown Account
-    10003, // Unknown Channel
-    10004, // Unknown Guild
-    10007, // Unknown Member
-    10008, // Unknown Message (เช่น Panel ของ /setup ถูกลบไปแล้ว — ใช้กับ /update)
-    10013, // Unknown User
-    50001, // Missing Access
-    50007, // Cannot send messages to this user (DM ปิด/บล็อกบอท)
-    50013  // Missing Permissions
+    10001,
+    10003,
+    10004,
+    10007,
+    10008,
+    10013,
+    50001,
+    50007,
+    50013
 ]);
 
 function isPermanentDiscordError(error) {
@@ -1828,12 +1633,6 @@ function createCancelToken() {
     return { cancelled: false };
 }
 
-/**
- * runQueue: ประมวลผล tasks ทีละกลุ่มตาม concurrency ที่กำหนด
- * @param {Array} tasks - รายการ task แต่ละตัวมี { id, run: async () => any }
- * @param {Object} options
- * @returns {Promise<{success:number, failed:number, skipped:number, rateLimited:number, results:Array}>}
- */
 async function runQueue(tasks, options = {}) {
     const {
         concurrency = 2,
@@ -1872,7 +1671,6 @@ async function runQueue(tasks, options = {}) {
             } catch (error) {
                 lastError = error;
 
-                // 429 Rate Limit — เคารพ retry_after ที่ Discord ส่งมาเสมอ ห้ามฝืนส่งซ้ำทันที
                 const isRateLimit =
                     error?.status === 429 ||
                     error?.httpStatus === 429;
@@ -1890,8 +1688,6 @@ async function runQueue(tasks, options = {}) {
                         )
                     );
 
-                    // Pause งานทั้งคิวชั่วคราวถ้าโดน rate limit ติดกันหลายครั้ง —
-                    // ป้องกันการฝืนยิง API ต่อเนื่องตอน Discord กำลังจำกัดเราอยู่จริงๆ
                     const pauseMs =
                         consecutiveRateLimits >= 3
                             ? retryAfterMs * 3
@@ -1906,7 +1702,6 @@ async function runQueue(tasks, options = {}) {
                 }
 
                 if (isPermanentDiscordError(error)) {
-                    // Error ถาวร (ปิด DM / บล็อกบอท / ไม่มีสิทธิ์ ฯลฯ) — ห้าม retry
                     failedCount += 1;
 
                     return {
@@ -1917,7 +1712,6 @@ async function runQueue(tasks, options = {}) {
                     };
                 }
 
-                // Error ชั่วคราวอื่นๆ — ใช้ exponential backoff แล้ว retry จนครบ maxRetries
                 attempt += 1;
 
                 if (attempt > maxRetries) {
@@ -1945,7 +1739,6 @@ async function runQueue(tasks, options = {}) {
     async function worker() {
         while (cursor < tasks.length) {
             if (cancelToken.cancelled) {
-                // ทำเครื่องหมายงานที่เหลือทั้งหมดว่าถูกข้าม (ยกเลิกระหว่างทำงาน)
                 while (cursor < tasks.length) {
                     const skippedTask = tasks[cursor];
                     cursor += 1;
@@ -1978,7 +1771,6 @@ async function runQueue(tasks, options = {}) {
                         rateLimited: rateLimitedCount
                     });
                 } catch {
-                    // ไม่ให้ error จาก callback progress ทำให้ queue หยุดทำงาน
                 }
             }
 
@@ -2008,18 +1800,9 @@ async function runQueue(tasks, options = {}) {
     };
 }
 
-// ======================================================
-// 15J. UPDATE EMBED BUILDERS
-// ======================================================
-
-// สร้างเนื้อหาของ Field รายการอัปเดต — เฉพาะ [ + ]/[ ~ ]/[ - ] ในกรอบ code block
-// เท่านั้น ไม่มีหัวข้อ ไม่มีวันที่ (ไม่มี Title/Description/Image แยก เพราะซ้ำซ้อนกับ
-// Embed หลักของ /setup อยู่แล้ว) ใช้ safeField ตัดให้ไม่เกิน 1024 ตัวอักษร (ขีดจำกัดจริงของ Embed Field Value)
 function buildUpdateFieldValue(draft) {
     const listBlock = draft.updateList ? draft.updateList.trim() : "";
 
-    // กรอบ code block เปล่าๆ มีแค่รายการอัปเดต [ + ]/[ ~ ]/[ - ] เท่านั้น
-    // ไม่มีหัวข้อ ไม่มีวันที่ — ตัดให้พอดีกับขีดจำกัด 1024 ตัวอักษรของ Field Value
     const wrapperLength = "```\n\n```".length;
     const maxListLength = Math.max(0, 1024 - wrapperLength - 3);
 
@@ -2031,11 +1814,6 @@ function buildUpdateFieldValue(draft) {
     return `\`\`\`\n${truncatedList}\n\`\`\``;
 }
 
-// merge Field รายการอัปเดตเข้ากับ Embed หลักของ /setup ที่มีอยู่เดิม (baseEmbedData
-// คือ embed data จากข้อความ Panel จริง หรือ null ถ้าไม่มี ให้ fallback เป็น buildMainEmbed())
-// - แทนที่ Field เดิม (ถ้ามี) ด้วยอันใหม่ทุกครั้ง (ลบของเก่าในกรอบออกหมดก่อนใส่ของใหม่ ไม่สะสม ไม่ซ้ำ)
-// - เก็บ Field/เนื้อหาอื่นของ Panel เดิมไว้ทั้งหมด และให้ Field นี้อยู่ล่างสุดเสมอ
-// - ใช้ Zero-Width Space เป็นชื่อ Field จึงไม่มีข้อความหัวข้อโชว์นอกกรอบ
 function buildUpdatedPanelEmbed(baseEmbedData, draft) {
     const embed = baseEmbedData
         ? EmbedBuilder.from(baseEmbedData)
@@ -2108,12 +1886,6 @@ function buildCancelOnlyRow(prefix, sessionId) {
     );
 }
 
-// ======================================================
-// 15K. DRAFT SESSION STORAGE (in-memory)
-// เก็บ Draft ของ /update ระหว่างขั้นตอน Modal → Preview → Confirm
-// เฉพาะ Bot Owner เท่านั้นที่เข้าถึงได้ (ตรวจซ้ำทุกจุด) จึง key ด้วย sessionId สุ่มพอ
-// เพื่อกันคนอื่นเดา customId มายุ่งกับ session ของ Owner ได้
-// ======================================================
 
 const updateSessions = new Map();
 
@@ -2121,9 +1893,8 @@ function makeSessionId() {
     return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// เก็บกวาด session ที่ค้างนานเกินไป (เผื่อ Owner ปิดหน้าต่างทิ้งไว้เฉยๆ) กัน memory leak
 setInterval(() => {
-    const cutoff = Date.now() - 30 * 60 * 1000; // 30 นาที
+    const cutoff = Date.now() - 30 * 60 * 1000;
 
     for (const [id, session] of updateSessions.entries()) {
         if (session.createdAt < cutoff) {
@@ -2132,11 +1903,6 @@ setInterval(() => {
     }
 }, 5 * 60 * 1000);
 
-// ======================================================
-// 15L. AUTO SETUP (ใช้โดยปุ่ม "⚙️ ตั้งค่าระบบอัตโนมัติ" ตอน DM ต้อนรับ)
-// สร้าง Category + Text Channel + Panel ให้อัตโนมัติถ้ายังไม่เคย Setup
-// ป้องกันการกดซ้ำพร้อมกันด้วย Lock ต่อ Guild
-// ======================================================
 
 const guildAutoSetupLocks = new Set();
 
@@ -2153,7 +1919,6 @@ async function runAutoGuildSetup(guild) {
     try {
         const existingSetup = await getGuildSetup(guild.id);
 
-        // ถ้าตั้งค่าไปแล้วและ channel/panel ยังใช้งานได้จริง ห้ามสร้างซ้ำ
         if (existingSetup?.targetChannelId) {
             const existingChannel = await client.channels
                 .fetch(existingSetup.targetChannelId)
@@ -2166,7 +1931,6 @@ async function runAutoGuildSetup(guild) {
                     channelId: existingChannel.id
                 };
             }
-            // ถ้า fetch ไม่เจอ (ถูกลบไปแล้ว) ให้ทำ setup ใหม่ต่อไปด้านล่างตามปกติ
         }
 
         const me = guild.members.me;
@@ -2279,9 +2043,6 @@ async function runAutoGuildSetup(guild) {
     }
 }
 
-// ======================================================
-// 15M. WELCOME DM (guildCreate)
-// ======================================================
 
 function buildWelcomeEmbed(guild) {
     return new EmbedBuilder()
@@ -2334,9 +2095,6 @@ function buildWelcomeButtons(guild) {
     );
 }
 
-// พยายามหาว่าใครเป็นคนเพิ่มบอทเข้ามาจาก Audit Log (ต้องมีสิทธิ์ View Audit Log)
-// ถ้าหาไม่ได้อย่างน่าเชื่อถือ (ไม่มีสิทธิ์ / entry ไม่ตรง / อายุเกิน) ให้คืน null
-// แล้วปล่อยให้ผู้เรียกใช้ fallback ไปหาเจ้าของเซิร์ฟเวอร์แทน — ห้ามเดาสุ่มเด็ดขาด
 async function findGuildAdderUserId(guild) {
     try {
         const me = guild.members.me;
@@ -2361,8 +2119,6 @@ async function findGuildAdderUserId(guild) {
             return null;
         }
 
-        // ตรวจว่า entry สดใหม่จริง (ภายใน 5 นาที) กันกรณีดึง log เก่าของการ add
-        // บอทตัวเดียวกันในอดีตที่เคย kick ออกแล้วเชิญกลับมาใหม่แต่ log ไม่ update
         const isFresh =
             Date.now() - entry.createdTimestamp < 5 * 60 * 1000;
 
@@ -2410,8 +2166,6 @@ async function sendWelcomeDm(guild) {
             allowedMentions: { parse: [] }
         });
     } catch (error) {
-        // DM ส่งไม่ได้ (ปิด DM / บล็อกบอท) เป็นเรื่องปกติมาก — log แบบปลอดภัยแล้วปล่อยผ่าน
-        // ห้ามทำให้ guildCreate handler ทั้งตัวพังเพราะ DM ส่งไม่ได้
         console.log(
             `ℹ️ guildCreate(${guild.id}): ส่ง DM ต้อนรับไม่สำเร็จ:`,
             sanitizeError(error)
@@ -2419,9 +2173,6 @@ async function sendWelcomeDm(guild) {
     }
 }
 
-// ======================================================
-// 16. STARTUP
-// ======================================================
 
 client.once(
     Events.ClientReady,
@@ -2445,14 +2196,10 @@ client.once(
 
             await registerCommands();
 
-            // เริ่ม Presence rotation (ครอบคลุมทุก Guild ที่บอทอยู่)
             startPresenceRotation();
 
-            // เริ่ม interval flush global stats เป็นระยะ (ไม่เขียนทุก interaction)
             startStatsFlushInterval();
 
-            // Sync ข้อมูล Guild ลง MongoDB (bot_guilds) — ทำแบบไม่บล็อก ready event
-            // เผื่อ MongoDB ยังเชื่อมต่อไม่เสร็จตอนนี้
             syncAllGuildStats().catch(error => {
                 console.error(
                     "⚠️ Initial guild stats sync error:",
@@ -2460,10 +2207,6 @@ client.once(
                 );
             });
 
-            // อัปเดต embed หน้าต่างฝากบอกของทุกเซิร์ฟเวอร์ที่เคย /setup ไว้แล้ว
-            // ให้ตรงกับ UI_CONFIG ล่าสุดในโค้ดโดยอัตโนมัติ (เผื่อ MongoDB ยังไม่พร้อม
-            // ตอนนี้ trySyncSetupPanelsOnce() จะถูกเรียกซ้ำอีกครั้งตอน MongoDB
-            // เชื่อมต่อสำเร็จใน connectDatabase())
             trySyncSetupPanelsOnce();
 
             console.log(
@@ -2480,10 +2223,6 @@ client.once(
     }
 );
 
-// ======================================================
-// 16B. GUILD JOIN / LEAVE
-// อัปเดต Presence + Guild Stats เมื่อบอทเข้า/ออกจากเซิร์ฟเวอร์
-// ======================================================
 
 client.on(Events.GuildCreate, async guild => {
     console.log(
@@ -2523,9 +2262,6 @@ client.on(Events.GuildDelete, async guild => {
     });
 });
 
-// ======================================================
-// 17. INTERACTION HANDLER
-// ======================================================
 
 client.on(
     Events.InteractionCreate,
@@ -2540,9 +2276,6 @@ client.on(
                 );
             }
 
-            // ==================================================
-            // /update — OWNER ONLY (STEP 1: กรอก Embed)
-            // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
@@ -2586,7 +2319,7 @@ client.on(
                             .setRequired(true)
                             .setMaxLength(ANNOUNCE_UPDATE_LIST_MAX)
                             .setPlaceholder(
-                                "[ + ] เพิ่มฟีเจอร์ใหม่\n[ ~ ] ปรับปรุงระบบเดิม\n[ - ] แก้ไขบั๊ก"
+                                "[ + ] เพิ่มฟีเจอร์ใหม่\n[ ~ ] ปรับปรุงระบบเดิม\n[ - ] แก้ไขบัค"
                             )
                     )
                 );
@@ -2594,9 +2327,6 @@ client.on(
                 return interaction.showModal(modal);
             }
 
-            // ==================================================
-            // MODAL: update_modal (STEP 2: Preview)
-            // ==================================================
 
             if (
                 interaction.isModalSubmit() &&
@@ -2651,9 +2381,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // BUTTON: update_edit:<sessionId>
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -2698,9 +2425,6 @@ client.on(
                 return interaction.showModal(modal);
             }
 
-            // ==================================================
-            // BUTTON: update_cancel:<sessionId>
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -2723,9 +2447,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // BUTTON: update_cancel_inflight:<sessionId>
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -2751,9 +2472,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // BUTTON: update_confirm:<sessionId> (STEP 3: ส่งจริง)
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -2799,9 +2517,6 @@ client.on(
 
                 const startedAt = Date.now();
 
-                // /update ต้องแก้ไข Embed หลักของ /setup (panelChannelId +
-                // panelMessageId) ในข้อความเดิมเท่านั้น — ห้ามส่ง Embed ใหม่แยก,
-                // ห้ามส่ง DM, ห้ามสร้างข้อความใหม่ทุกครั้งที่อัปเดต
                 let targetGuilds = [];
 
                 try {
@@ -2836,15 +2551,11 @@ client.on(
                             setup.panelMessageId
                         );
 
-                        // merge Field "📢 อัปเดตล่าสุด" เข้ากับ Embed หลักของ Panel เดิม
-                        // (แทนที่ Field เดิมถ้ามี ไม่สะสม ไม่ลบเนื้อหาอื่นของ /setup)
                         const mergedEmbed = buildUpdatedPanelEmbed(
                             panelMessage.embeds[0] || null,
                             session.draft
                         );
 
-                        // แก้ไขข้อความเดิมด้วย message.edit() เท่านั้น และคงปุ่ม
-                        // Components เดิมของ Panel ไว้ทั้งหมด
                         await panelMessage.edit({
                             embeds: [mergedEmbed],
                             components: panelMessage.components
@@ -2923,9 +2634,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // BUTTON: welcome_setup:<guildId> (จากปุ่มใน DM ต้อนรับ)
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -2983,9 +2691,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // BUTTON: welcome_help (จากปุ่มใน DM ต้อนรับ)
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -3017,15 +2722,11 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // /owner-1 — OWNER ONLY
-            // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
                 interaction.commandName === "owner-1"
             ) {
-                // ตรวจสอบ Owner ก่อนทำอะไรทั้งสิ้น ห้าม query ข้อมูลใดๆ ก่อนผ่านจุดนี้
                 if (await rejectIfNotOwner(interaction)) {
                     return;
                 }
@@ -3037,8 +2738,6 @@ client.on(
                 const totalServers =
                     client.guilds.cache.size;
 
-                // ผลรวมสมาชิกของ "ทุก" เซิร์ฟเวอร์ที่บอทอยู่ — ไม่ใช่ Unique Members
-                // (คนเดียวกันอาจอยู่หลายเซิร์ฟเวอร์ได้ จึงนับซ้ำได้)
                 const totalMembersSum =
                     getTotalMemberCount();
 
@@ -3117,9 +2816,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // /owner-3 — OWNER ONLY
-            // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
@@ -3152,7 +2848,6 @@ client.on(
                     process.uptime()
                 );
 
-                // ไม่เปิดเผย Token / Mongo URI / Environment Variables / Password / Secrets ใดๆ
                 const botStatsEmbed = new EmbedBuilder()
                     .setColor("#57F287")
                     .setTitle("🤖 Bot Deep Stats (Owner Only)")
@@ -3222,15 +2917,11 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // /owner-2 — OWNER ONLY (with pagination)
-            // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
                 interaction.commandName === "owner-2"
             ) {
-                // ตรวจสอบ Owner ก่อน — ห้าม query/ส่ง Server List ก่อนผ่านจุดนี้
                 if (await rejectIfNotOwner(interaction)) {
                     return;
                 }
@@ -3248,9 +2939,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // BUTTON: servers pagination (servers_page:<page>)
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -3258,8 +2946,6 @@ client.on(
                     "servers_page:"
                 )
             ) {
-                // สำคัญ: ห้ามเชื่อว่าคนกดปุ่มคือคนเดียวกับที่เรียก /servers
-                // ต้องตรวจ BOT_OWNER_ID ใหม่ทุกครั้งที่มีการกดปุ่ม
                 if (await rejectIfNotOwner(interaction)) {
                     return;
                 }
@@ -3286,9 +2972,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // /help — อธิบายเฉพาะ /setup และ /setchannel
-            // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
@@ -3322,9 +3005,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // /setup
-            // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
@@ -3374,7 +3054,6 @@ client.on(
 
                 let panelMessage = null;
 
-                // พยายามใช้ Panel เดิมก่อน
                 const existingSetup =
                     await getGuildSetup(
                         interaction.guildId
@@ -3418,7 +3097,6 @@ client.on(
                     }
                 }
 
-                // ถ้าไม่มี Panel เดิม ให้สร้างใหม่
                 if (!panelMessage) {
                     try {
                         panelMessage =
@@ -3439,7 +3117,6 @@ client.on(
                     }
                 }
 
-                // บันทึก Panel
                 try {
                     await guildSetups.updateOne(
                         {
@@ -3483,9 +3160,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // /setchannel
-            // ==================================================
 
             if (
                 interaction.isChatInputCommand() &&
@@ -3581,9 +3255,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // BUTTON: anonymous_send
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -3656,9 +3327,6 @@ client.on(
                 });
             }
 
-            // ==================================================
-            // USER SELECT: recipient
-            // ==================================================
 
             if (
                 interaction.isUserSelectMenu() &&
@@ -3754,9 +3422,6 @@ client.on(
                 );
             }
 
-            // ==================================================
-            // MODAL: message_modal
-            // ==================================================
 
             if (
                 interaction.isModalSubmit() &&
@@ -3853,7 +3518,6 @@ client.on(
                     });
                 }
 
-                // กันส่งหาตัวเองอีกชั้น
                 if (
                     recipient.id ===
                     interaction.user.id
@@ -3977,9 +3641,6 @@ client.on(
                 }
             }
 
-            // ==================================================
-            // BUTTON: reply_button
-            // ==================================================
 
             if (
                 interaction.isButton() &&
@@ -4074,9 +3735,6 @@ client.on(
                 );
             }
 
-            // ==================================================
-            // MODAL: reply_modal
-            // ==================================================
 
             if (
                 interaction.isModalSubmit() &&
@@ -4147,10 +3805,6 @@ client.on(
                     });
                 }
 
-                // ==================================================
-                // ATOMIC UPDATE
-                // กันกดตอบพร้อมกันหลายครั้ง
-                // ==================================================
 
                 const updateResult =
                     await anonymousMessages.updateOne(
@@ -4185,9 +3839,6 @@ client.on(
                     });
                 }
 
-                // ==================================================
-                // UPDATE PUBLIC MESSAGE
-                // ==================================================
 
                 let publicEditSuccess =
                     false;
@@ -4220,9 +3871,6 @@ client.on(
                         );
                 }
 
-                // ==================================================
-                // SEND DM TO SENDER
-                // ==================================================
 
                 let dmSuccess = false;
 
@@ -4252,9 +3900,6 @@ client.on(
                     );
                 }
 
-                // ==================================================
-                // RESULT
-                // ==================================================
 
                 if (
                     publicEditSuccess &&
@@ -4320,9 +3965,6 @@ client.on(
                     await interaction.reply(errorMessage);
                 }
             } catch (replyError) {
-                // Interaction อาจหมดอายุแล้ว (เช่น token หมดอายุ ~15 นาที
-                // หรือ Unknown interaction) — log ไว้แทนเพื่อไม่ให้ error หายไปเฉยๆ
-                // และไม่พยายามตอบซ้ำจนเกิด error เพิ่ม
                 logDetailedError(
                     `Interaction Error Reply Failed: ${interactionContext}`,
                     replyError
@@ -4332,15 +3974,9 @@ client.on(
     }
 );
 
-// ======================================================
-// 18. START BOT
-// ======================================================
 
 (async () => {
     try {
-        // สำคัญ: ไม่ await connectDatabase() ตรงนี้
-        // ให้ Mongo เชื่อมต่อใน background แทน เพื่อไม่ให้ MongoDB ที่ต่อช้า/ล่ม
-        // ไปบล็อกหรือทำให้ Discord Bot login/register commands ไม่ได้
         connectDatabase().catch(error => {
             console.error(
                 "❌ MongoDB background connection error:",
@@ -4363,14 +3999,10 @@ client.on(
     }
 })();
 
-// ======================================================
-// 19. PROCESS ERROR HANDLERS
-// ======================================================
 
 process.on(
     "unhandledRejection",
     error => {
-        // Promise rejection ธรรมดาไม่ควรทำให้บอทล่มทั้งตัว — แค่ log ไว้
         console.error(
             "❌ Unhandled Promise Rejection:",
             sanitizeError(error)
@@ -4381,9 +4013,6 @@ process.on(
 process.on(
     "uncaughtException",
     error => {
-        // Uncaught exception หมายความว่า process อยู่ในสถานะที่ไม่แน่นอนแล้ว
-        // การพยายามทำงานต่อไปอาจไม่ปลอดภัย จึง log แล้ว exit เพื่อให้ Render
-        // restart process ให้ใหม่ (fatal error ที่กู้คืนเองไม่ได้)
         console.error(
             "❌ Uncaught Exception (fatal, exiting):",
             sanitizeError(error)
@@ -4393,11 +4022,6 @@ process.on(
     }
 );
 
-// ======================================================
-// 20. GRACEFUL SHUTDOWN
-// รองรับ SIGINT / SIGTERM — หยุด interval, background job, ปิด MongoDB,
-// ปิด Discord Client, ปิด HTTP Server ตามลำดับ และป้องกันไม่ให้ทำงานซ้ำ
-// ======================================================
 
 let shuttingDown = false;
 
@@ -4412,7 +4036,6 @@ async function gracefulShutdown(signal) {
         `🛑 ได้รับสัญญาณ ${signal} — กำลังปิดระบบอย่างปลอดภัย...`
     );
 
-    // 1. หยุด interval ทั้งหมด
     if (presenceInterval) {
         clearInterval(presenceInterval);
         presenceInterval = null;
@@ -4423,7 +4046,6 @@ async function gracefulShutdown(signal) {
         statsFlushInterval = null;
     }
 
-    // 2. Flush global stats ที่ค้างอยู่ใน memory ก่อนปิด (best-effort)
     try {
         await flushGlobalStats();
     } catch (error) {
@@ -4433,7 +4055,6 @@ async function gracefulShutdown(signal) {
         );
     }
 
-    // 3. ปิด MongoDB connection
     try {
         await mongo.close();
         mongoConnected = false;
@@ -4445,7 +4066,6 @@ async function gracefulShutdown(signal) {
         );
     }
 
-    // 4. ปิด Discord Client
     try {
         client.destroy();
         console.log("✅ ปิดการเชื่อมต่อ Discord Client แล้ว");
@@ -4456,7 +4076,6 @@ async function gracefulShutdown(signal) {
         );
     }
 
-    // 5. ปิด HTTP Server
     try {
         await new Promise((resolve, reject) => {
             httpServer.close(error => {
@@ -4483,3 +4102,4 @@ async function gracefulShutdown(signal) {
 
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGHUP", () => gracefulShutdown("SIGHUP"));
